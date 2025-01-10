@@ -1,0 +1,36 @@
+language: "en"
+early_access: false
+reviews:
+    request_changes_workflow: false
+    high_level_summary: true
+    poem: false
+    review_status: false
+    collapse_walkthrough: true
+    path_filters:
+        - "!api/"
+        - "!docs/"
+        - "!*.md"
+    path_instructions:
+        - path: "**/*.go"
+          instructions: "Review the Golang code for conformity with the Uber Golang style guide, highlighting any deviations. Only report issues that you have a high degree of confidence in."
+        - path: "tests/e2e/*"
+          instructions: |
+              "Assess the e2e test code assessing sufficient code coverage for the changes associated in the pull request. Only report issues that you have a high degree of confidence in."
+        - path: "tests/integration/*"
+          instructions: |
+              "Assess the e2e test code assessing sufficient code coverage for the changes associated in the pull request. Only report issues that you have a high degree of confidence in."
+        - path: "**/*_test.go"
+          instructions: |
+              "Assess the unit test code assessing sufficient code coverage for the changes associated in the pull request. Only report issues that you have a high degree of confidence in."
+    auto_review:
+        enabled: false
+        ignore_title_keywords:
+            - "WIP"
+            - "DO NOT MERGE"
+        drafts: false
+        base_branches:
+            - "main"
+            - "feat/*"
+            - "release/*"
+chat:
+    auto_reply: true

@@ -8,13 +8,17 @@ const (
 	// module supports
 	Version = "1"
 
-	// ChannelStatusKeyPrefix is the key prefix for storing the validation status of the CCV channel
-	ChannelStatusKeyPrefix = "channelstatus"
+	// ProviderPortID is the default port id the provider CCV module binds to
+	ProviderPortID = "provider"
+
+	// ConsumerPortID is the default port id the consumer CCV module binds to
+	ConsumerPortID = "consumer"
 
 	RouterKey = ModuleName
-)
 
-// ChannelStatusKey returns the key under which the Status of a consumer chain is stored.
-func ChannelStatusKey(channelID string) []byte {
-	return []byte(ChannelStatusKeyPrefix + "/" + channelID)
-}
+	// StoreKey defines the primary module store key
+	StoreKey = ModuleName
+
+	// MemStoreKey defines the in-memory store key
+	MemStoreKey = "mem_ccv"
+)

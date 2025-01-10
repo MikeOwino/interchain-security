@@ -1,211 +1,279 @@
 package keeper
 
 import (
-	"encoding/binary"
+	"errors"
 	"fmt"
+	"strconv"
+
+	clienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
+	channeltypes "github.com/cosmos/ibc-go/v8/modules/core/04-channel/types"
+
+	errorsmod "cosmossdk.io/errors"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
-	channeltypes "github.com/cosmos/ibc-go/v3/modules/core/04-channel/types"
-	host "github.com/cosmos/ibc-go/v3/modules/core/24-host"
-	"github.com/cosmos/ibc-go/v3/modules/core/exported"
-	"github.com/cosmos/interchain-security/x/ccv/consumer/types"
-	ccv "github.com/cosmos/interchain-security/x/ccv/types"
-	utils "github.com/cosmos/interchain-security/x/ccv/utils"
-	abci "github.com/tendermint/tendermint/abci/types"
+
+	abci "github.com/cometbft/cometbft/abci/types"
+
+	"github.com/cosmos/interchain-security/v6/x/ccv/consumer/types"
+	ccv "github.com/cosmos/interchain-security/v6/x/ccv/types"
 )
 
-// OnRecvPacket sets the pending validator set changes that will be flushed to ABCI on Endblock
-// and set the unbonding time for the packet so that we can WriteAcknowledgement after unbonding time is over.
-func (k Keeper) OnRecvPacket(ctx sdk.Context, packet channeltypes.Packet, newChanges ccv.ValidatorSetChangePacketData) exported.Acknowledgement {
+// OnRecvVSCPacket sets the pending validator set changes that will be flushed to ABCI on Endblock
+// and set the maturity time for the packet. Once the maturity time elapses, a VSCMatured packet is
+// sent back to the provider chain.
+//
+// Note: CCV uses an ordered IBC channel, meaning VSC packet changes will be accumulated (and later
+// processed by ApplyCCValidatorChanges) s.t. more recent val power changes overwrite older ones.
+func (k Keeper) OnRecvVSCPacket(ctx sdk.Context, packet channeltypes.Packet, newChanges ccv.ValidatorSetChangePacketData) error {
+	// validate packet data upon receiving
+	if err := newChanges.Validate(); err != nil {
+		return errorsmod.Wrapf(err, "error validating VSCPacket data")
+	}
+
 	// get the provider channel
 	providerChannel, found := k.GetProviderChannel(ctx)
 	if found && providerChannel != packet.DestinationChannel {
-		// packet is not sent on provider channel, return error acknowledgement and close channel
-		ack := channeltypes.NewErrorAcknowledgement(
-			fmt.Sprintf("packet sent on a channel %s other than the established provider channel %s", packet.DestinationChannel, providerChannel),
-		)
-		chanCap, _ := k.scopedKeeper.GetCapability(ctx, host.ChannelCapabilityPath(packet.DestinationPort, packet.DestinationChannel))
-		k.channelKeeper.ChanCloseInit(ctx, packet.DestinationPort, packet.DestinationChannel, chanCap)
-		return &ack
+		// VSC packet was sent on a channel different than the provider channel;
+		// this should never happen
+		panic(fmt.Errorf("VSCPacket received on unknown channel %s; expected: %s",
+			packet.DestinationChannel, providerChannel))
 	}
 	if !found {
 		// the first packet from the provider chain
 		// - mark the CCV channel as established
 		k.SetProviderChannel(ctx, packet.DestinationChannel)
-		// - send pending slash requests in states
-		k.SendPendingSlashRequests(ctx)
+		k.Logger(ctx).Info("CCV channel established", "port", packet.DestinationPort, "channel", packet.DestinationChannel)
+
+		// emit event on first VSC packet to signal that CCV is working
+		ctx.EventManager().EmitEvent(
+			sdk.NewEvent(
+				ccv.EventTypeChannelEstablished,
+				sdk.NewAttribute(sdk.AttributeKeyModule, types.ModuleName),
+				sdk.NewAttribute(channeltypes.AttributeKeyChannelID, packet.DestinationChannel),
+				sdk.NewAttribute(channeltypes.AttributeKeyPortID, packet.DestinationPort),
+			),
+		)
 	}
 	// Set pending changes by accumulating changes from this packet with all prior changes
-	var pendingChanges []abci.ValidatorUpdate
+	currentValUpdates := []abci.ValidatorUpdate{}
 	currentChanges, exists := k.GetPendingChanges(ctx)
-	if !exists {
-		pendingChanges = newChanges.ValidatorUpdates
-	} else {
-		pendingChanges = utils.AccumulateChanges(currentChanges.ValidatorUpdates, newChanges.ValidatorUpdates)
+	if exists {
+		currentValUpdates = currentChanges.ValidatorUpdates
 	}
+	pendingChanges := ccv.AccumulateChanges(currentValUpdates, newChanges.ValidatorUpdates)
+
 	k.SetPendingChanges(ctx, ccv.ValidatorSetChangePacketData{
 		ValidatorUpdates: pendingChanges,
 	})
 
-	// Save maturity time and packet
-	unbondingPeriod, found := k.GetUnbondingTime(ctx)
-	if !found {
-		panic("the unbonding period is not set on the consumer chain")
-	}
-	maturityTime := ctx.BlockTime().Add(unbondingPeriod)
-	k.SetPacketMaturityTime(ctx, packet.Sequence, uint64(maturityTime.UnixNano()))
-	k.SetUnbondingPacket(ctx, packet.Sequence, packet)
-
 	// set height to VSC id mapping
-	k.SetHeightValsetUpdateID(ctx, uint64(ctx.BlockHeight())+1, newChanges.ValsetUpdateId)
+	blockHeight := uint64(ctx.BlockHeight()) + 1
+	k.SetHeightValsetUpdateID(ctx, blockHeight, newChanges.ValsetUpdateId)
+	k.Logger(ctx).Debug("block height was mapped to vscID", "height", blockHeight, "vscID", newChanges.ValsetUpdateId)
 
-	// set outstanding slashing flags to false
-	for _, addr := range newChanges.GetSlashAcks() {
-		k.ClearOutstandingDowntime(ctx, addr)
-	}
-
-	// ack will be sent asynchronously
-	return nil
-}
-
-// UnbondMaturePackets will iterate over the unbonding packets in order and write acknowledgements for all
-// packets that have finished unbonding.
-func (k Keeper) UnbondMaturePackets(ctx sdk.Context) error {
-	store := ctx.KVStore(k.storeKey)
-	maturityIterator := sdk.KVStorePrefixIterator(store, []byte(types.PacketMaturityTimePrefix))
-	defer maturityIterator.Close()
-
-	currentTime := uint64(ctx.BlockTime().UnixNano())
-
-	channelID, ok := k.GetProviderChannel(ctx)
-	if !ok {
-		return sdkerrors.Wrap(channeltypes.ErrChannelNotFound, "provider channel not set")
-	}
-	channelCap, ok := k.scopedKeeper.GetCapability(ctx, host.ChannelCapabilityPath(types.PortID, channelID))
-	if !ok {
-		return sdkerrors.Wrap(channeltypes.ErrChannelCapabilityNotFound, "module does not own channel capability")
-	}
-
-	for maturityIterator.Valid() {
-		sequence := types.GetSequenceFromPacketMaturityTimeKey(maturityIterator.Key())
-		if currentTime > binary.BigEndian.Uint64(maturityIterator.Value()) {
-			// write successful ack and delete unbonding information
-			packet, err := k.GetUnbondingPacket(ctx, sequence)
-			if err != nil {
-				return err
-			}
-			ack := channeltypes.NewResultAcknowledgement([]byte{byte(1)})
-			k.channelKeeper.WriteAcknowledgement(ctx, channelCap, packet, ack)
-			k.DeletePacketMaturityTime(ctx, sequence)
-			k.DeleteUnbondingPacket(ctx, sequence)
-		} else {
-			break
+	// remove outstanding slashing flags of the validators
+	// for which the slashing was acknowledged by the provider chain
+	for _, ack := range newChanges.GetSlashAcks() {
+		// get consensus address from bech32 address
+		consAddr, err := ccv.GetConsAddrFromBech32(ack)
+		if err != nil {
+			// Do not return an error as it would lead to the consumer being
+			// removed by the provider
+			k.Logger(ctx).Error("invalid consensus address in VSCPacket.SlashAcks",
+				"vscID", newChanges.ValsetUpdateId,
+				"SlashAck", ack,
+				"error", err)
+			continue
 		}
-		maturityIterator.Next()
+		k.DeleteOutstandingDowntime(ctx, consAddr)
 	}
+
+	k.Logger(ctx).Info("finished receiving/handling VSCPacket",
+		"vscID", newChanges.ValsetUpdateId,
+		"len updates", len(newChanges.ValidatorUpdates),
+		"len slash acks", len(newChanges.SlashAcks),
+	)
 	return nil
 }
 
-// SendSlashPacket sends a slash packet containing the given validator data and slashing info
-func (k Keeper) SendSlashPacket(ctx sdk.Context, validator abci.Validator, valsetUpdateID uint64, infraction stakingtypes.InfractionType) {
+// QueueSlashPacket appends a slash packet containing the given validator data and slashing info to queue.
+func (k Keeper) QueueSlashPacket(ctx sdk.Context, validator abci.Validator, valsetUpdateID uint64, infraction stakingtypes.Infraction) {
 	consAddr := sdk.ConsAddress(validator.Address)
-	downtime := infraction == stakingtypes.Downtime
+	downtime := infraction == stakingtypes.Infraction_INFRACTION_DOWNTIME
 
 	// return if an outstanding downtime request is set for the validator
 	if downtime && k.OutstandingDowntime(ctx, consAddr) {
 		return
 	}
 
-	// construct slash packet data
-	packetData := ccv.NewSlashPacketData(validator, valsetUpdateID, infraction)
+	if downtime {
+		// set outstanding downtime to not send multiple
+		// slashing requests for the same downtime infraction
+		k.SetOutstandingDowntime(ctx, consAddr)
+	}
 
-	// check that provider channel is established
-	// if not, append slashing packet to pending slash requests
+	// construct slash packet data
+	slashPacket := ccv.NewSlashPacketData(validator, valsetUpdateID, infraction)
+
+	// append the Slash packet data to pending data packets
+	// to be sent once the CCV channel is established
+	k.AppendPendingPacket(ctx,
+		ccv.SlashPacket,
+		&ccv.ConsumerPacketData_SlashPacketData{
+			SlashPacketData: slashPacket,
+		},
+	)
+
+	k.Logger(ctx).Info("SlashPacket enqueued",
+		"vscID", slashPacket.ValsetUpdateId,
+		"validator cons addr", sdk.ConsAddress(slashPacket.Validator.Address).String(),
+		"infraction", slashPacket.Infraction,
+	)
+
+	ctx.EventManager().EmitEvent(
+		sdk.NewEvent(
+			types.EventTypeConsumerSlashRequest,
+			sdk.NewAttribute(sdk.AttributeKeyModule, types.ModuleName),
+			sdk.NewAttribute(ccv.AttributeValidatorAddress, sdk.ConsAddress(validator.Address).String()),
+			sdk.NewAttribute(ccv.AttributeValSetUpdateID, strconv.Itoa(int(valsetUpdateID))),
+			sdk.NewAttribute(ccv.AttributeInfractionType, infraction.String()),
+		),
+	)
+}
+
+// SendPackets iterates queued packets and sends them in FIFO order.
+// received VSC packets in order, and write acknowledgements for all matured VSC packets.
+//
+// This method is a no-op if there is no established channel to provider or the queue is empty.
+//
+// Note: Per spec, a VSC reaching maturity on a consumer chain means that all the unbonding
+// operations that resulted in validator updates included in that VSC have matured on
+// the consumer chain.
+func (k Keeper) SendPackets(ctx sdk.Context) {
 	channelID, ok := k.GetProviderChannel(ctx)
 	if !ok {
-		k.AppendPendingSlashRequests(ctx, types.SlashRequest{
-			Packet:     &packetData,
-			Infraction: infraction},
-		)
 		return
 	}
 
-	// send packet over IBC
-	err := utils.SendIBCPacket(
-		ctx,
-		k.scopedKeeper,
-		k.channelKeeper,
-		channelID,    // source channel id
-		types.PortID, // source port id
-		packetData.GetBytes(),
-	)
-	if err != nil {
-		panic(err)
-	}
+	pending := k.GetAllPendingPacketsWithIdx(ctx)
+	idxsForDeletion := []uint64{}
+	for _, p := range pending {
+		if !k.PacketSendingPermitted(ctx) {
+			break
+		}
 
-	// set outstanding downtime if slash request sent is for downtime
-	if downtime {
-		k.SetOutstandingDowntime(ctx, consAddr)
+		// Send packet over IBC
+		err := ccv.SendIBCPacket(
+			ctx,
+			k.scopedKeeper,
+			k.channelKeeper,
+			channelID,          // source channel id
+			ccv.ConsumerPortID, // source port id
+			p.GetBytes(),
+			k.GetCCVTimeoutPeriod(ctx),
+		)
+		if err != nil {
+			if errors.Is(err, clienttypes.ErrClientNotActive) {
+				// IBC client is expired!
+				// leave the packet data stored to be sent once the client is upgraded
+				k.Logger(ctx).Info("IBC client is expired, cannot send IBC packet; leaving packet data stored:", "type", p.Type.String())
+				break
+			}
+			// Not able to send packet over IBC!
+			// Leave the packet data stored for the sent to be retried in the next block.
+			// Note that if VSCMaturedPackets are not sent for long enough, the provider
+			// will remove the consumer anyway.
+			k.Logger(ctx).Error("cannot send IBC packet; leaving packet data stored:", "type", p.Type.String(), "err", err.Error())
+			break
+		}
+		// If the packet that was just sent was a Slash packet, set the waiting on slash reply flag.
+		// This flag will be toggled false again when consumer hears back from provider. See OnAcknowledgementPacket below.
+		if p.Type == ccv.SlashPacket {
+			k.UpdateSlashRecordOnSend(ctx)
+			// Break so slash stays at head of queue.
+			// This blocks the sending of any other packet until the leading slash packet is handled.
+			// Also see OnAcknowledgementPacket below which will eventually delete the leading slash packet.
+			break
+		}
+		// Otherwise the vsc matured will be deleted
+		idxsForDeletion = append(idxsForDeletion, p.Idx)
 	}
+	// Delete pending packets that were successfully sent and did not return an error from SendIBCPacket
+	k.DeletePendingDataPackets(ctx, idxsForDeletion...)
 }
 
-// SendPendingSlashRequests iterates over the stored pending slash requests in reverse order
-// and sends the embedded slash packets to the provider chain
-func (k Keeper) SendPendingSlashRequests(ctx sdk.Context) {
-	channelID, ok := k.GetProviderChannel(ctx)
-	if !ok {
-		panic(fmt.Errorf("%s: CCV channel not set", channeltypes.ErrChannelNotFound))
-	}
+// OnAcknowledgementPacket executes application logic for acknowledgments of sent VSCMatured and Slash packets
+// in conjunction with the ibc module's execution of "acknowledgePacket",
+// according to https://github.com/cosmos/ibc/tree/main/spec/core/ics-004-channel-and-packet-semantics#processing-acknowledgements
+func (k Keeper) OnAcknowledgementPacket(ctx sdk.Context, packet channeltypes.Packet, ack channeltypes.Acknowledgement) error {
+	if res := ack.GetResult(); res != nil {
+		if len(res) != 1 {
+			return fmt.Errorf("acknowledgement result length must be 1, got %d", len(res))
+		}
 
-	// iterate over pending slash requests in reverse order
-	requests := k.GetPendingSlashRequests(ctx)
-	for i := len(requests) - 1; i >= 0; i-- {
-		slashReq := requests[i]
+		// Unmarshal into V1 consumer packet data type. We trust data is formed correctly
+		// as it was originally marshalled by this module, and consumers must trust the provider
+		// did not tamper with the data. Note ConsumerPacketData.GetBytes() always JSON marshals to the
+		// ConsumerPacketDataV1 type which is sent over the wire.
+		var consumerPacket ccv.ConsumerPacketDataV1
+		ccv.ModuleCdc.MustUnmarshalJSON(packet.GetData(), &consumerPacket)
+		// If this ack is regarding a provider handling a vsc matured packet, there's nothing to do.
+		// As vsc matured packets are popped from the consumer pending packets queue on send.
+		if consumerPacket.Type == ccv.VscMaturedPacket {
+			return nil
+		}
 
-		// send the emebdded slash packet to the CCV channel
-		// if the outstanding downtime flag is false for the validator
-		downtime := slashReq.Infraction == stakingtypes.Downtime
-		if !downtime || !k.OutstandingDowntime(ctx, sdk.ConsAddress(slashReq.Packet.Validator.Address)) {
-			// send packet over IBC
-			err := utils.SendIBCPacket(
-				ctx,
-				k.scopedKeeper,
-				k.channelKeeper,
-				channelID,    // source channel id
-				types.PortID, // source port id
-				slashReq.Packet.GetBytes(),
-			)
-			if err != nil {
-				panic(err)
-			}
-
-			// set validator outstanding downtime flag to true
-			if downtime {
-				k.SetOutstandingDowntime(ctx, sdk.ConsAddress(slashReq.Packet.Validator.Address))
-			}
+		// Otherwise we handle the result of the slash packet acknowledgement.
+		switch res[0] {
+		// We treat a v1 result as the provider successfully queuing the slash packet w/o need for retry.
+		case ccv.V1Result[0]:
+			k.ClearSlashRecord(ctx)           // Clears slash record state, unblocks sending of pending packets.
+			k.DeleteHeadOfPendingPackets(ctx) // Remove slash from head of queue. It's been handled.
+		case ccv.SlashPacketHandledResult[0]:
+			k.ClearSlashRecord(ctx)           // Clears slash record state, unblocks sending of pending packets.
+			k.DeleteHeadOfPendingPackets(ctx) // Remove slash from head of queue. It's been handled.
+		case ccv.SlashPacketBouncedResult[0]:
+			k.UpdateSlashRecordOnBounce(ctx)
+			// Note slash is still at head of queue and will now be retried after appropriate delay period.
+		default:
+			return fmt.Errorf("unrecognized acknowledgement result: %c", res[0])
 		}
 	}
 
-	// clear pending slash requests
-	k.ClearPendingSlashRequests(ctx)
-}
-
-func (k Keeper) OnAcknowledgementPacket(ctx sdk.Context, packet channeltypes.Packet, data ccv.SlashPacketData, ack channeltypes.Acknowledgement) error {
 	if err := ack.GetError(); err != "" {
-		// slashing packet was sent to a nonestablished channel
-		if err != sdkerrors.Wrap(
-			channeltypes.ErrInvalidChannelState,
-			packet.DestinationChannel,
-		).Error() {
-			return fmt.Errorf(err)
+		// Reasons for ErrorAcknowledgment
+		//  - packet data could not be successfully decoded
+		//  - invalid Slash packet
+		// None of these should ever happen.
+		k.Logger(ctx).Error(
+			"recv ErrorAcknowledgement",
+			"channel", packet.SourceChannel,
+			"error", err,
+		)
+		// Initiate ChanCloseInit using packet source (non-counterparty) port and channel
+		err := k.ChanCloseInit(ctx, packet.SourcePort, packet.SourceChannel)
+		if err != nil {
+			return fmt.Errorf("ChanCloseInit(%s) failed: %s", packet.SourceChannel, err.Error())
+		}
+		// check if there is an established CCV channel to provider
+		channelID, found := k.GetProviderChannel(ctx)
+		if !found {
+			return errorsmod.Wrapf(types.ErrNoProposerChannelId, "recv ErrorAcknowledgement on non-established channel %s", packet.SourceChannel)
+		}
+		if channelID != packet.SourceChannel {
+			// Close the established CCV channel as well
+			return k.ChanCloseInit(ctx, ccv.ConsumerPortID, channelID)
 		}
 	}
-
 	return nil
 }
 
-func (k Keeper) OnTimeoutPacket(ctx sdk.Context, packet channeltypes.Packet, data ccv.SlashPacketData) error {
-	return nil
+// IsChannelClosed returns a boolean whether a given channel is in the CLOSED state
+func (k Keeper) IsChannelClosed(ctx sdk.Context, channelID string) bool {
+	channel, found := k.channelKeeper.GetChannel(ctx, ccv.ConsumerPortID, channelID)
+	if !found || channel.State == channeltypes.CLOSED {
+		return true
+	}
+	return false
 }

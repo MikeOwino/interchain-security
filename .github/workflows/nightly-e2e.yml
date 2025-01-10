@@ -1,0 +1,431 @@
+# Run integration tests nightly on main
+name: nightly-e2e-main
+on:
+  workflow_dispatch:
+  schedule:
+    # run every day at 03:00 UTC
+    #        ┌───────────── minute (0 - 59)
+    #        │  ┌───────────── hour (0 - 23)
+    #        │  │ ┌───────────── day of the month (1 - 31)
+    #        │  │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #        │  │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    #        │  │ │ │ │
+    #        │  │ │ │ │
+    #        │  │ │ │ │
+    #        *  * * * *
+    - cron: "0 3 * * *"
+
+jobs:
+  compatibility-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # get all history for all branches and tags
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E compatibility test
+        # Run compatibility tests for different consumer (-cv) and provider (-pv) versions.
+        # Combination of all provider versions with consumer versions are tested.
+        # For new versions to be tested add/modify -pc/-cv parameters.
+        run: go run ./tests/e2e/... --tc compatibility -pv latest -cv latest -cv v5.2.0 -cv v6.3.0
+  happy-path-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E happy-path test
+        run: go run ./tests/e2e/... --tc happy-path
+  changeover-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E changeover test
+        run: go run ./tests/e2e/... --tc changeover
+  democracy-reward-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E democracy-reward tests
+        run: go run ./tests/e2e/... --tc democracy-reward
+  democracy-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E democracy tests
+        run: go run ./tests/e2e/... --tc democracy
+  slash-throttle-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E slash-throttle tests
+        run: go run ./tests/e2e/... --tc slash-throttle
+  multiconsumer-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E multi-consumer tests
+        run: go run ./tests/e2e/... --tc multiconsumer
+  consumer-misbehaviour-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E consumer-misbehaviour tests
+        run: go run ./tests/e2e/... --tc consumer-misbehaviour
+  consumer-double-sign-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E consumer-double-sign tests
+        run: go run ./tests/e2e/... --tc consumer-double-sign
+  consumer-double-downtime-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E consumer-double-downtime tests
+        run: go run ./tests/e2e/... --tc consumer-double-downtime
+  partial-set-security-opt-in-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E partial set security opt-in chain
+        run: go run ./tests/e2e/... --tc partial-set-security-opt-in
+  partial-set-security-top-n-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E partial set security Top N chain
+        run: go run ./tests/e2e/... --tc partial-set-security-top-n
+  partial-set-security-validator-set-cap-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E partial set security validator-set cap
+        run: go run ./tests/e2e/... --tc partial-set-security-validator-set-cap
+  partial-set-security-validators-power-cap-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E partial set security validators-power cap
+        run: go run ./tests/e2e/... --tc partial-set-security-validators-power-cap
+  partial-set-security-validators-allowlisted-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E partial set security allowlist
+        run: go run ./tests/e2e/... --tc partial-set-security-validators-allowlisted
+  partial-set-security-validators-denylisted-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E partial set security denylist
+        run: go run ./tests/e2e/... --tc partial-set-security-validators-denylisted
+  partial-set-security-validators-prioritylisted-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E partial set security prioritylist
+        run: go run ./tests/e2e/... --tc partial-set-security-validators-prioritylisted
+  partial-set-security-modification-proposal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E partial set security modification proposal
+        run: go run ./tests/e2e/... --tc partial-set-security-modification-proposal
+  active-set-changes-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E active set changes
+        run: go run ./tests/e2e/... --tc active-set-changes
+  permissionless-basic-test:
+          runs-on: ubuntu-latest
+          timeout-minutes: 20
+          steps:
+            - uses: actions/setup-go@v5
+              with:
+                go-version: "1.22"
+            - uses: actions/checkout@v4
+            - name: Checkout LFS objects
+              run: git lfs checkout
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                go-version: "1.22" # The Go version to download (if necessary) and use.
+            - name: E2E basic permissionless tests
+              run: go run ./tests/e2e/... --tc permissionless-ics
+  permissionless-topN-test:
+          runs-on: ubuntu-latest
+          timeout-minutes: 20
+          steps:
+            - uses: actions/setup-go@v5
+              with:
+                go-version: "1.22"
+            - uses: actions/checkout@v4
+            - name: Checkout LFS objects
+              run: git lfs checkout
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                go-version: "1.22" # The Go version to download (if necessary) and use.
+            - name: E2E permissionless TopN tests
+              run: go run ./tests/e2e/... --tc permissionless-topN
+
+  inactive-provider-validators-on-consumer-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/checkout@v4
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22" # The Go version to download (if necessary) and use.
+      - name: E2E inactive provider validators on consumer
+        run: go run ./tests/e2e/... --tc inactive-provider-validators-on-consumer
+
+  nightly-test-fail:
+    needs:
+      - happy-path-test
+      - changeover-test
+      - democracy-reward-test
+      - democracy-test
+      - slash-throttle-test
+      - multiconsumer-test
+      - consumer-misbehaviour-test
+      - consumer-double-sign-test
+      - consumer-double-downtime-test
+      - partial-set-security-opt-in-test
+      - partial-set-security-top-n-test
+      - partial-set-security-validator-set-cap-test
+      - partial-set-security-validators-power-cap-test
+      - partial-set-security-validators-allowlisted-test
+      - partial-set-security-validators-denylisted-test
+      - partial-set-security-validators-prioritylisted-test
+      - partial-set-security-modification-proposal
+      - active-set-changes-test
+      - permissionless-basic-test
+      - permissionless-topN-test
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack on failure
+        uses: slackapi/slack-github-action@v2.0.0
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+          BRANCH: ${{ github.ref_name }}
+          RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          COMMITS_URL: "${{ github.server_url }}/${{ github.repository }}/commits/${{ github.ref_name }}"
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "E2E tests failed❗",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ":skull: Nightly E2E tests for `${{ env.BRANCH }}` failed.\n\nSee the <${{ env.RUN_URL }}|run details> and the <${{ env.COMMITS_URL }}|latest commits> possibly related to the failure."
+                  }
+                }
+              ]
+            }

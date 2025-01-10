@@ -1,42 +1,37 @@
 package types
 
 import (
-	"bytes"
+	ibctmtypes "github.com/cosmos/ibc-go/v8/modules/light-clients/07-tendermint"
 
-	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
-	ibctmtypes "github.com/cosmos/ibc-go/v3/modules/light-clients/07-tendermint/types"
-	ccv "github.com/cosmos/interchain-security/x/ccv/types"
+	errorsmod "cosmossdk.io/errors"
 
-	abci "github.com/tendermint/tendermint/abci/types"
-	tmtypes "github.com/tendermint/tendermint/types"
+	abci "github.com/cometbft/cometbft/abci/types"
+
+	ccv "github.com/cosmos/interchain-security/v6/x/ccv/types"
 )
 
-// NewInitialGenesisState returns a consumer GenesisState for a completely new consumer chain.
-// TODO: Include chain status
-func NewInitialGenesisState(cs *ibctmtypes.ClientState, consState *ibctmtypes.ConsensusState,
-	initValSet []abci.ValidatorUpdate, params Params) *GenesisState {
-
-	return &GenesisState{
-		Params:               params,
-		NewChain:             true,
-		ProviderClientState:    cs,
-		ProviderConsensusState: consState,
-		InitialValSet:        initValSet,
-	}
-}
-
 // NewRestartGenesisState returns a consumer GenesisState that has already been established.
-func NewRestartGenesisState(clientID, channelID string,
-	unbondingSequences []UnbondingSequence,
-	initValSet []abci.ValidatorUpdate, params Params) *GenesisState {
-
+func NewRestartGenesisState(
+	clientID, channelID string,
+	initValSet []abci.ValidatorUpdate,
+	heightToValsetUpdateIDs []HeightToValsetUpdateID,
+	pendingConsumerPackets ConsumerPacketDataList,
+	outstandingDowntimes []OutstandingDowntime,
+	lastTransBlockHeight LastTransmissionBlockHeight,
+	params ccv.ConsumerParams,
+) *GenesisState {
 	return &GenesisState{
-		Params:             params,
-		ProviderClientId:     clientID,
-		ProviderChannelId:    channelID,
-		UnbondingSequences: unbondingSequences,
-		NewChain:           false,
-		InitialValSet:      initValSet,
+		NewChain: false,
+		Params:   params,
+		Provider: ccv.ProviderInfo{
+			InitialValSet: initValSet,
+		},
+		HeightToValsetUpdateId:      heightToValsetUpdateIDs,
+		PendingConsumerPackets:      pendingConsumerPackets,
+		OutstandingDowntimeSlashing: outstandingDowntimes,
+		LastTransmissionBlockHeight: lastTransBlockHeight,
+		ProviderClientId:            clientID,
+		ProviderChannelId:           channelID,
 	}
 }
 
@@ -44,81 +39,136 @@ func NewRestartGenesisState(clientID, channelID string,
 // unless explicitly specified in genesis.
 func DefaultGenesisState() *GenesisState {
 	return &GenesisState{
-		Params: DefaultParams(),
+		Params: ccv.DefaultParams(),
+	}
+}
+
+// NewInitialGenesisState returns a GenesisState for a completely new consumer chain.
+func NewInitialGenesisState(cs *ibctmtypes.ClientState, consState *ibctmtypes.ConsensusState,
+	initValSet []abci.ValidatorUpdate, params ccv.ConsumerParams,
+) *GenesisState {
+	return &GenesisState{
+		NewChain: true,
+		Params:   params,
+		Provider: ccv.ProviderInfo{
+			ClientState:    cs,
+			ConsensusState: consState,
+			InitialValSet:  initValSet,
+		},
 	}
 }
 
 // Validate performs basic genesis state validation returning an error upon any failure.
+//
+// The three cases where a consumer chain starts/restarts
+// expect the following optional and mandatory genesis states:
+//
+// 1. New chain starts:
+//   - Params, InitialValset // mandatory
+//
+// 1a. ConnectionId is empty
+//   - provider client state, provider consensus state // mandatory
+//
+// 1b. ConnectionId is not empty
+//   - provider client state, provider consensus state // nil
+//
+// 2. Chain restarts with CCV handshake still in progress:
+//   - Params, InitialValset, ProviderID, HeightToValidatorSetUpdateID // mandatory
+//   - PendingConsumerPacket // optional
+//
+// 3. Chain restarts with CCV handshake completed:
+//   - Params, InitialValset, ProviderID, channelID, HeightToValidatorSetUpdateID // mandatory
+//   - MaturingVSCPackets, OutstandingDowntime, PendingConsumerPacket, LastTransmissionBlockHeight // optional
 func (gs GenesisState) Validate() error {
 	if !gs.Params.Enabled {
 		return nil
 	}
-	if len(gs.InitialValSet) == 0 {
-		return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "initial validator set is empty")
+	if len(gs.Provider.InitialValSet) == 0 {
+		return errorsmod.Wrap(ccv.ErrInvalidGenesis, "initial validator set is empty")
+	}
+	if err := gs.Params.Validate(); err != nil {
+		return err
 	}
 
 	if gs.NewChain {
-		if gs.ProviderClientState == nil {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "provider client state cannot be nil for new chain")
-		}
-		if err := gs.ProviderClientState.Validate(); err != nil {
-			return sdkerrors.Wrapf(ccv.ErrInvalidGenesis, "provider client state invalid for new chain %s", err.Error())
-		}
-		if gs.ProviderConsensusState == nil {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "provider consensus state cannot be nil for new chain")
-		}
-		if err := gs.ProviderConsensusState.ValidateBasic(); err != nil {
-			return sdkerrors.Wrapf(ccv.ErrInvalidGenesis, "provider consensus state invalid for new chain %s", err.Error())
-		}
-		if gs.ProviderClientId != "" {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "provider client id cannot be set for new chain. It must be established on handshake")
-		}
-		if gs.ProviderChannelId != "" {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "provider channel id cannot be set for new chain. It must be established on handshake")
-		}
-		if len(gs.UnbondingSequences) != 0 {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "unbonding sequences must be empty for new chain")
+		if gs.ConnectionId == "" {
+			// connection ID is not provided
+			if gs.Provider.ClientState == nil {
+				return errorsmod.Wrap(ccv.ErrInvalidGenesis, "provider client state cannot be nil for new chain")
+			}
+			if err := gs.Provider.ClientState.Validate(); err != nil {
+				return errorsmod.Wrapf(ccv.ErrInvalidGenesis, "provider client state invalid for new chain %s", err.Error())
+			}
+			if gs.Provider.ConsensusState == nil {
+				return errorsmod.Wrap(ccv.ErrInvalidGenesis, "provider consensus state cannot be nil for new chain")
+			}
+			if err := gs.Provider.ConsensusState.ValidateBasic(); err != nil {
+				return errorsmod.Wrapf(ccv.ErrInvalidGenesis, "provider consensus state invalid for new chain %s", err.Error())
+			}
+		} else {
+			// connection ID is provided
+			if gs.Provider.ClientState != nil {
+				return errorsmod.Wrap(ccv.ErrInvalidGenesis, "provider client state must be nil when connection id is provided")
+			}
+			if gs.Provider.ConsensusState != nil {
+				return errorsmod.Wrap(ccv.ErrInvalidGenesis, "provider consensus state must be nil when connection id is provided")
+			}
+			if err := ccv.ValidateConnectionIdentifier(gs.ConnectionId); err != nil {
+				return errorsmod.Wrapf(ccv.ErrInvalidGenesis, "invalid connection id: %s", err.Error())
+			}
 		}
 
-		// ensure that initial validator set is same as initial consensus state on provider client.
-		// this will be verified by provider module on channel handshake.
-		vals, err := tmtypes.PB2TM.ValidatorUpdates(gs.InitialValSet)
-		if err != nil {
-			return sdkerrors.Wrap(err, "could not convert val updates to validator set")
+		if gs.ProviderClientId != "" {
+			return errorsmod.Wrap(ccv.ErrInvalidGenesis, "provider client id cannot be set for new chain. It must be established on handshake")
 		}
-		valSet := tmtypes.NewValidatorSet(vals)
-		if !bytes.Equal(gs.ProviderConsensusState.NextValidatorsHash, valSet.Hash()) {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "initial validators does not hash to NextValidatorsHash on provider client")
+		if gs.ProviderChannelId != "" {
+			return errorsmod.Wrap(ccv.ErrInvalidGenesis, "provider channel id cannot be set for new chain. It must be established on handshake")
+		}
+		if len(gs.HeightToValsetUpdateId) != 0 {
+			return errorsmod.Wrap(ccv.ErrInvalidGenesis, "HeightToValsetUpdateId must be nil for new chain")
+		}
+		if len(gs.OutstandingDowntimeSlashing) != 0 {
+			return errorsmod.Wrap(ccv.ErrInvalidGenesis, "OutstandingDowntimeSlashing must be nil for new chain")
+		}
+		if len(gs.PendingConsumerPackets.List) != 0 {
+			return errorsmod.Wrap(ccv.ErrInvalidGenesis, "pending consumer packets must be empty for new chain")
+		}
+		if gs.LastTransmissionBlockHeight.Height != 0 {
+			return errorsmod.Wrap(ccv.ErrInvalidGenesis, "last transmission block height must be empty for new chain")
 		}
 	} else {
 		// NOTE: For restart genesis, we will verify initial validator set in InitGenesis.
 		if gs.ProviderClientId == "" {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "provider client id must be set for a restarting consumer genesis state")
+			return errorsmod.Wrap(ccv.ErrInvalidGenesis, "provider client id must be set for a restarting consumer genesis state")
 		}
-		if gs.ProviderChannelId == "" {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "provider channel id must be set for a restarting consumer genesis state")
-		}
-		if gs.ProviderClientState != nil || gs.ProviderConsensusState != nil {
-			return sdkerrors.Wrap(ccv.ErrInvalidGenesis, "provider client state and consensus states must be nil for a restarting genesis state")
-		}
-		for _, us := range gs.UnbondingSequences {
-			if err := us.Validate(); err != nil {
-				return sdkerrors.Wrap(err, "invalid unbonding sequences")
+		// handshake is still in progress
+		handshakeInProgress := gs.ProviderChannelId == ""
+		if handshakeInProgress {
+			if len(gs.OutstandingDowntimeSlashing) != 0 {
+				return errorsmod.Wrap(
+					ccv.ErrInvalidGenesis, "outstanding downtime must be empty when handshake in progress")
+			}
+			if gs.LastTransmissionBlockHeight.Height != 0 {
+				return errorsmod.Wrap(
+					ccv.ErrInvalidGenesis, "last transmission block height must be zero when handshake in progress")
+			}
+			if len(gs.PendingConsumerPackets.List) != 0 {
+				for _, packet := range gs.PendingConsumerPackets.List {
+					if packet.Type == ccv.VscMaturedPacket {
+						return errorsmod.Wrap(ccv.ErrInvalidGenesis, "pending maturing packets must be empty when handshake isn't completed")
+					}
+				}
 			}
 		}
-	}
-	return nil
-}
-
-func (us UnbondingSequence) Validate() error {
-	if us.UnbondingTime == 0 {
-		return sdkerrors.Wrap(ccv.ErrInvalidUnbondingTime, "cannot have 0 unbonding time")
-	}
-	if err := us.UnbondingPacket.ValidateBasic(); err != nil {
-		return sdkerrors.Wrap(err, "invalid unbonding packet")
-	}
-	if us.UnbondingPacket.Sequence != us.Sequence {
-		return sdkerrors.Wrapf(ccv.ErrInvalidUnbondingSequence, "unbonding sequence %d must match packet sequence %d", us.Sequence, us.UnbondingPacket.Sequence)
+		/* 		if gs.HeightToValsetUpdateId == nil {
+			return errorsmod.Wrap(
+				ccv.ErrInvalidGenesis,
+				"empty height to validator set update id mapping",
+			)
+		} */
+		if gs.Provider.ClientState != nil || gs.Provider.ConsensusState != nil {
+			return errorsmod.Wrap(ccv.ErrInvalidGenesis, "provider client state and consensus state must be nil for a restarting genesis state")
+		}
 	}
 	return nil
 }

@@ -1,213 +1,212 @@
 package keeper_test
 
 import (
-	"bytes"
 	"fmt"
+	"sort"
 	"testing"
-	"time"
 
-	evidencetypes "github.com/cosmos/cosmos-sdk/x/evidence/types"
+	ibctesting "github.com/cosmos/ibc-go/v8/testing"
+	"github.com/stretchr/testify/require"
 
-	"github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	slashingtypes "github.com/cosmos/cosmos-sdk/x/slashing/types"
-	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+	"cosmossdk.io/math"
 
-	clienttypes "github.com/cosmos/ibc-go/v3/modules/core/02-client/types"
-	channeltypes "github.com/cosmos/ibc-go/v3/modules/core/04-channel/types"
-	ibctesting "github.com/cosmos/ibc-go/v3/testing"
+	cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
 
-	appConsumer "github.com/cosmos/interchain-security/app/consumer"
-	appProvider "github.com/cosmos/interchain-security/app/provider"
-	"github.com/cosmos/interchain-security/testutil/simapp"
-	consumertypes "github.com/cosmos/interchain-security/x/ccv/consumer/types"
-	providertypes "github.com/cosmos/interchain-security/x/ccv/provider/types"
-	"github.com/cosmos/interchain-security/x/ccv/types"
-	ccv "github.com/cosmos/interchain-security/x/ccv/types"
-	utils "github.com/cosmos/interchain-security/x/ccv/utils"
-	abci "github.com/tendermint/tendermint/abci/types"
-	tmtypes "github.com/tendermint/tendermint/types"
+	abci "github.com/cometbft/cometbft/abci/types"
+	tmprotocrypto "github.com/cometbft/cometbft/proto/tendermint/crypto"
 
-	"github.com/stretchr/testify/suite"
+	cryptotestutil "github.com/cosmos/interchain-security/v6/testutil/crypto"
+	testkeeper "github.com/cosmos/interchain-security/v6/testutil/keeper"
+	providertypes "github.com/cosmos/interchain-security/v6/x/ccv/provider/types"
+	ccv "github.com/cosmos/interchain-security/v6/x/ccv/types"
 )
 
-type KeeperTestSuite struct {
-	suite.Suite
+const (
+	CONSUMER_CHAIN_ID = "chain-id"
+	CONSUMER_ID       = "0"
+)
 
-	coordinator *ibctesting.Coordinator
+// TestValsetUpdateBlockHeight tests the getter, setter, and deletion methods for valset updates mapped to block height
+func TestValsetUpdateBlockHeight(t *testing.T) {
+	providerKeeper, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
-	// testing chains
-	providerChain *ibctesting.TestChain
-	consumerChain *ibctesting.TestChain
+	blockHeight, found := providerKeeper.GetValsetUpdateBlockHeight(ctx, uint64(0))
+	require.False(t, found)
+	require.Zero(t, blockHeight)
 
-	path *ibctesting.Path
+	providerKeeper.SetValsetUpdateBlockHeight(ctx, uint64(1), uint64(2))
+	blockHeight, found = providerKeeper.GetValsetUpdateBlockHeight(ctx, uint64(1))
+	require.True(t, found)
+	require.Equal(t, blockHeight, uint64(2))
 
-	ctx sdk.Context
+	providerKeeper.DeleteValsetUpdateBlockHeight(ctx, uint64(1))
+	blockHeight, found = providerKeeper.GetValsetUpdateBlockHeight(ctx, uint64(1))
+	require.False(t, found)
+	require.Zero(t, blockHeight)
+
+	providerKeeper.SetValsetUpdateBlockHeight(ctx, uint64(1), uint64(2))
+	providerKeeper.SetValsetUpdateBlockHeight(ctx, uint64(3), uint64(4))
+	blockHeight, found = providerKeeper.GetValsetUpdateBlockHeight(ctx, uint64(3))
+	require.True(t, found)
+	require.Equal(t, blockHeight, uint64(4))
 }
 
-func (suite *KeeperTestSuite) SetupTest() {
-	suite.coordinator, suite.providerChain, suite.consumerChain = simapp.NewProviderConsumerCoordinator(suite.T())
+// TestGetAllValsetUpdateBlockHeights tests GetAllValsetUpdateBlockHeights behaviour correctness
+func TestGetAllValsetUpdateBlockHeights(t *testing.T) {
+	pk, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
-	// valsets must match
-	providerValUpdates := tmtypes.TM2PB.ValidatorUpdates(suite.providerChain.Vals)
-	consumerValUpdates := tmtypes.TM2PB.ValidatorUpdates(suite.consumerChain.Vals)
-	suite.Require().True(len(providerValUpdates) == len(consumerValUpdates), "initial valset not matching")
-	for i := 0; i < len(providerValUpdates); i++ {
-		addr1 := utils.GetChangePubKeyAddress(providerValUpdates[i])
-		addr2 := utils.GetChangePubKeyAddress(consumerValUpdates[i])
-		suite.Require().True(bytes.Compare(addr1, addr2) == 0, "validator mismatch")
+	cases := []providertypes.ValsetUpdateIdToHeight{
+		{
+			ValsetUpdateId: 2,
+			Height:         22,
+		},
+		{
+			ValsetUpdateId: 1,
+			Height:         11,
+		},
+		{
+			// normal execution should not have two ValsetUpdateIdToHeight
+			// with the same Height, but let's test it anyway
+			ValsetUpdateId: 4,
+			Height:         11,
+		},
+		{
+			ValsetUpdateId: 3,
+			Height:         33,
+		},
+	}
+	expectedGetAllOrder := cases
+	// sorting by ValsetUpdateId
+	sort.Slice(expectedGetAllOrder, func(i, j int) bool {
+		return expectedGetAllOrder[i].ValsetUpdateId < expectedGetAllOrder[j].ValsetUpdateId
+	})
+
+	for _, c := range cases {
+		pk.SetValsetUpdateBlockHeight(ctx, c.ValsetUpdateId, c.Height)
 	}
 
-	// suite.DisableConsumerDistribution()
-
-	// move both chains to the next block
-	suite.providerChain.NextBlock()
-	suite.consumerChain.NextBlock()
-
-	// create consumer client on provider chain and set as consumer client for consumer chainID in provider keeper.
-	suite.providerChain.App.(*appProvider.App).ProviderKeeper.CreateConsumerClient(
-		suite.providerChain.GetContext(),
-		suite.consumerChain.ChainID,
-		suite.consumerChain.LastHeader.GetHeight().(clienttypes.Height),
-	)
-	// move provider to next block to commit the state
-	suite.providerChain.NextBlock()
-
-	// initialize the consumer chain with the genesis state stored on the provider
-	consumerGenesis, found := suite.providerChain.App.(*appProvider.App).ProviderKeeper.GetConsumerGenesis(
-		suite.providerChain.GetContext(),
-		suite.consumerChain.ChainID,
-	)
-	suite.Require().True(found, "consumer genesis not found")
-	suite.consumerChain.App.(*appConsumer.App).ConsumerKeeper.InitGenesis(suite.consumerChain.GetContext(), &consumerGenesis)
-
-	// create path for the CCV channel
-	suite.path = ibctesting.NewPath(suite.consumerChain, suite.providerChain)
-
-	// update CCV path with correct info
-	// - set provider endpoint's clientID
-	consumerClient, found := suite.providerChain.App.(*appProvider.App).ProviderKeeper.GetConsumerClientId(
-		suite.providerChain.GetContext(),
-		suite.consumerChain.ChainID,
-	)
-	suite.Require().True(found, "consumer client not found")
-	suite.path.EndpointB.ClientID = consumerClient
-	// - set consumer endpoint's clientID
-	providerClient, found := suite.consumerChain.App.(*appConsumer.App).ConsumerKeeper.GetProviderClient(suite.consumerChain.GetContext())
-	suite.Require().True(found, "provider client not found")
-	suite.path.EndpointA.ClientID = providerClient
-	// - client config
-	providerUnbondingPeriod := suite.providerChain.App.(*appProvider.App).GetStakingKeeper().UnbondingTime(suite.providerChain.GetContext())
-	suite.path.EndpointB.ClientConfig.(*ibctesting.TendermintConfig).UnbondingPeriod = providerUnbondingPeriod
-	suite.path.EndpointB.ClientConfig.(*ibctesting.TendermintConfig).TrustingPeriod = providerUnbondingPeriod / utils.TrustingPeriodFraction
-	consumerUnbondingPeriod := utils.ComputeConsumerUnbondingPeriod(providerUnbondingPeriod)
-	suite.path.EndpointA.ClientConfig.(*ibctesting.TendermintConfig).UnbondingPeriod = consumerUnbondingPeriod
-	suite.path.EndpointA.ClientConfig.(*ibctesting.TendermintConfig).TrustingPeriod = consumerUnbondingPeriod / utils.TrustingPeriodFraction
-	// - channel config
-	suite.path.EndpointA.ChannelConfig.PortID = consumertypes.PortID
-	suite.path.EndpointB.ChannelConfig.PortID = providertypes.PortID
-	suite.path.EndpointA.ChannelConfig.Version = types.Version
-	suite.path.EndpointB.ChannelConfig.Version = types.Version
-	suite.path.EndpointA.ChannelConfig.Order = channeltypes.ORDERED
-	suite.path.EndpointB.ChannelConfig.Order = channeltypes.ORDERED
-
-	// set chains sender account number
-	// TODO: to be fixed in #151
-	suite.path.EndpointB.Chain.SenderAccount.SetAccountNumber(6)
-	suite.path.EndpointA.Chain.SenderAccount.SetAccountNumber(1)
-
-	suite.ctx = suite.providerChain.GetContext()
+	// iterate and check all results are returned in the expected order
+	result := pk.GetAllValsetUpdateBlockHeights(ctx)
+	require.Len(t, result, len(cases))
+	require.Equal(t, expectedGetAllOrder, result)
 }
 
-func TestKeeperTestSuite(t *testing.T) {
-	suite.Run(t, new(KeeperTestSuite))
-}
+// TestSlashAcks tests the getter, setter, iteration, and deletion methods for stored slash acknowledgements
+func TestSlashAcks(t *testing.T) {
+	providerKeeper, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
-func (suite *KeeperTestSuite) TestValsetUpdateBlockHeight() {
-	app := suite.providerChain.App.(*appProvider.App)
-	ctx := suite.ctx
+	chainID := CONSUMER_CHAIN_ID
 
-	blockHeight := app.ProviderKeeper.GetValsetUpdateBlockHeight(ctx, uint64(0))
-	suite.Require().Zero(blockHeight)
-
-	app.ProviderKeeper.SetValsetUpdateBlockHeight(ctx, uint64(1), uint64(2))
-	blockHeight = app.ProviderKeeper.GetValsetUpdateBlockHeight(ctx, uint64(1))
-	suite.Require().Equal(blockHeight, uint64(2))
-
-	app.ProviderKeeper.DeleteValsetUpdateBlockHeight(ctx, uint64(1))
-	blockHeight = app.ProviderKeeper.GetValsetUpdateBlockHeight(ctx, uint64(1))
-	suite.Require().Zero(blockHeight)
-
-	app.ProviderKeeper.SetValsetUpdateBlockHeight(ctx, uint64(1), uint64(2))
-	app.ProviderKeeper.SetValsetUpdateBlockHeight(ctx, uint64(3), uint64(4))
-	blockHeight = app.ProviderKeeper.GetValsetUpdateBlockHeight(ctx, uint64(3))
-	suite.Require().Equal(blockHeight, uint64(4))
-}
-
-func (suite *KeeperTestSuite) TestSlashAcks() {
-	app := suite.providerChain.App.(*appProvider.App)
-	ctx := suite.ctx
-
-	var chainsAcks [][]string
-
-	penaltiesfN := func() (penalties []string) {
-		app.ProviderKeeper.IterateSlashAcks(ctx, func(id string, acks []string) bool {
-			chainsAcks = append(chainsAcks, acks)
-			return true
-		})
-		return
-	}
-
-	chainID := "consumer"
-
-	acks := app.ProviderKeeper.GetSlashAcks(ctx, chainID)
-	suite.Require().Nil(acks)
+	acks := providerKeeper.GetSlashAcks(ctx, chainID)
+	require.Nil(t, acks)
 
 	p := []string{"alice", "bob", "charlie"}
-	app.ProviderKeeper.SetSlashAcks(ctx, chainID, p)
+	providerKeeper.SetSlashAcks(ctx, chainID, p)
 
-	acks = app.ProviderKeeper.GetSlashAcks(ctx, chainID)
-	suite.Require().NotNil(acks)
+	acks = providerKeeper.GetSlashAcks(ctx, chainID)
+	require.NotNil(t, acks)
 
-	suite.Require().Len(acks, 3)
-	emptied := app.ProviderKeeper.EmptySlashAcks(ctx, chainID)
-	suite.Require().Len(emptied, 3)
+	require.Len(t, acks, 3)
+	slashAcks := providerKeeper.ConsumeSlashAcks(ctx, chainID)
+	require.Len(t, slashAcks, 3)
 
-	acks = app.ProviderKeeper.GetSlashAcks(ctx, chainID)
-	suite.Require().Nil(acks)
+	acks = providerKeeper.GetSlashAcks(ctx, chainID)
+	require.Nil(t, acks)
 
 	chains := []string{"c1", "c2", "c3"}
 
 	for _, c := range chains {
-		app.ProviderKeeper.SetSlashAcks(ctx, c, p)
+		providerKeeper.SetSlashAcks(ctx, c, p)
 	}
 
-	penaltiesfN()
-	suite.Require().Len(chainsAcks, len(chains))
+	for _, c := range chains {
+		require.Equal(t, p, providerKeeper.GetSlashAcks(ctx, c))
+		providerKeeper.DeleteSlashAcks(ctx, c)
+		acks = providerKeeper.GetSlashAcks(ctx, c)
+		require.Len(t, acks, 0)
+	}
 }
 
-func (suite *KeeperTestSuite) TestAppendSlashAck() {
-	app := suite.providerChain.App.(*appProvider.App)
-	ctx := suite.ctx
+// TestAppendSlashAck tests the append method for stored slash acknowledgements
+func TestAppendSlashAck(t *testing.T) {
+	providerKeeper, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
 	p := []string{"alice", "bob", "charlie"}
 	chains := []string{"c1", "c2"}
-	app.ProviderKeeper.SetSlashAcks(ctx, chains[0], p)
+	providerKeeper.SetSlashAcks(ctx, chains[0], p)
 
-	app.ProviderKeeper.AppendSlashAck(ctx, chains[0], p[0])
-	acks := app.ProviderKeeper.GetSlashAcks(ctx, chains[0])
-	suite.Require().NotNil(acks)
-	suite.Require().Len(acks, len(p)+1)
+	providerKeeper.AppendSlashAck(ctx, chains[0], p[0])
+	acks := providerKeeper.GetSlashAcks(ctx, chains[0])
+	require.NotNil(t, acks)
+	require.Len(t, acks, len(p)+1)
 
-	app.ProviderKeeper.AppendSlashAck(ctx, chains[1], p[0])
-	acks = app.ProviderKeeper.GetSlashAcks(ctx, chains[1])
-	suite.Require().NotNil(acks)
-	suite.Require().Len(acks, 1)
+	providerKeeper.AppendSlashAck(ctx, chains[1], p[0])
+	acks = providerKeeper.GetSlashAcks(ctx, chains[1])
+	require.NotNil(t, acks)
+	require.Len(t, acks, 1)
 }
 
-func (suite *KeeperTestSuite) TestInitHeight() {
-	app := suite.providerChain.App.(*appProvider.App)
-	ctx := suite.ctx
+// TestPendingVSCs tests the getter, appending, and deletion methods for stored pending VSCs
+func TestPendingVSCs(t *testing.T) {
+	providerKeeper, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
+
+	chainID := CONSUMER_CHAIN_ID
+
+	pending := providerKeeper.GetPendingVSCPackets(ctx, chainID)
+	require.Len(t, pending, 0)
+
+	_, pks, _ := ibctesting.GenerateKeys(t, 4)
+	var ppks [4]tmprotocrypto.PublicKey
+	for i, pk := range pks {
+		ppks[i], _ = cryptocodec.ToCmtProtoPublicKey(pk)
+	}
+
+	packetList := []ccv.ValidatorSetChangePacketData{
+		{
+			ValidatorUpdates: []abci.ValidatorUpdate{
+				{PubKey: ppks[0], Power: 1},
+				{PubKey: ppks[1], Power: 2},
+			},
+			ValsetUpdateId: 1,
+		},
+		{
+			ValidatorUpdates: []abci.ValidatorUpdate{
+				{PubKey: ppks[2], Power: 3},
+			},
+			ValsetUpdateId: 2,
+		},
+	}
+	providerKeeper.AppendPendingVSCPackets(ctx, chainID, packetList...)
+
+	packets := providerKeeper.GetPendingVSCPackets(ctx, chainID)
+	require.Len(t, packets, 2)
+
+	newPacket := ccv.ValidatorSetChangePacketData{
+		ValidatorUpdates: []abci.ValidatorUpdate{
+			{PubKey: ppks[3], Power: 4},
+		},
+		ValsetUpdateId: 3,
+	}
+	providerKeeper.AppendPendingVSCPackets(ctx, chainID, newPacket)
+	vscs := providerKeeper.GetPendingVSCPackets(ctx, chainID)
+	require.Len(t, vscs, 3)
+	require.True(t, vscs[len(vscs)-1].ValsetUpdateId == 3)
+	require.True(t, vscs[len(vscs)-1].GetValidatorUpdates()[0].PubKey.String() == ppks[3].String())
+
+	providerKeeper.DeletePendingVSCPackets(ctx, chainID)
+	pending = providerKeeper.GetPendingVSCPackets(ctx, chainID)
+	require.Len(t, pending, 0)
+}
+
+// TestInitHeight tests the getter and setter methods for the stored block heights (on provider) when a given consumer chain was started
+func TestInitHeight(t *testing.T) {
+	providerKeeper, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
 	tc := []struct {
 		chainID  string
@@ -218,232 +217,158 @@ func (suite *KeeperTestSuite) TestInitHeight() {
 		{expected: 12, chainID: "chain2"},
 	}
 
-	app.ProviderKeeper.SetInitChainHeight(ctx, tc[1].chainID, tc[1].expected)
-	app.ProviderKeeper.SetInitChainHeight(ctx, tc[2].chainID, tc[2].expected)
+	providerKeeper.SetInitChainHeight(ctx, tc[1].chainID, tc[1].expected)
+	providerKeeper.SetInitChainHeight(ctx, tc[2].chainID, tc[2].expected)
 
-	for _, t := range tc {
-		height := app.ProviderKeeper.GetInitChainHeight(ctx, t.chainID)
-		suite.Require().EqualValues(t.expected, height)
+	for _, tc := range tc {
+		height, _ := providerKeeper.GetInitChainHeight(ctx, tc.chainID)
+		require.Equal(t, tc.expected, height)
 	}
 }
 
-func (suite *KeeperTestSuite) TestHandleSlashPacketDoubleSigning() {
-	ProviderKeeper := suite.providerChain.App.(*appProvider.App).ProviderKeeper
-	providerSlashingKeeper := suite.providerChain.App.(*appProvider.App).SlashingKeeper
-	providerStakingKeeper := suite.providerChain.App.(*appProvider.App).StakingKeeper
+func TestGetAllConsumersWithIBCClients(t *testing.T) {
+	pk, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
-	tmVal := suite.providerChain.Vals.Validators[0]
-	consAddr := sdk.ConsAddress(tmVal.Address)
+	consumerIds := []string{"2", "1", "4", "3"}
+	for i, consumerId := range consumerIds {
+		clientId := fmt.Sprintf("client-%d", len(consumerIds)-i)
+		pk.SetConsumerClientId(ctx, consumerId, clientId)
+		pk.SetConsumerPhase(ctx, consumerId, providertypes.CONSUMER_PHASE_LAUNCHED)
+	}
 
-	// check that validator bonded status
-	validator, found := providerStakingKeeper.GetValidatorByConsAddr(suite.ctx, consAddr)
-	suite.Require().True(found)
-	suite.Require().Equal(stakingtypes.Bonded, validator.GetStatus())
+	actualConsumerIds := pk.GetAllConsumersWithIBCClients(ctx)
+	require.Len(t, actualConsumerIds, len(consumerIds))
 
-	// set init VSC id for chain0
-	ProviderKeeper.SetInitChainHeight(suite.ctx, suite.consumerChain.ChainID, uint64(suite.ctx.BlockHeight()))
-
-	// set validator signing-info
-	providerSlashingKeeper.SetValidatorSigningInfo(
-		suite.ctx,
-		consAddr,
-		slashingtypes.ValidatorSigningInfo{Address: consAddr.String()},
-	)
-
-	err := ProviderKeeper.HandleSlashPacket(suite.ctx, suite.consumerChain.ChainID,
-		ccv.NewSlashPacketData(
-			abci.Validator{Address: tmVal.Address, Power: 0},
-			uint64(0),
-			stakingtypes.DoubleSign,
-		),
-	)
-	suite.NoError(err)
-
-	// verify that validator is jailed in the staking and slashing mdodules' states
-	suite.Require().True(providerStakingKeeper.IsValidatorJailed(suite.ctx, consAddr))
-
-	signingInfo, _ := providerSlashingKeeper.GetValidatorSigningInfo(suite.ctx, consAddr)
-	suite.Require().True(signingInfo.JailedUntil.Equal(evidencetypes.DoubleSignJailEndTime))
-	suite.Require().True(signingInfo.Tombstoned)
+	// sort the consumer ids before comparing they are equal
+	sort.Slice(consumerIds, func(i, j int) bool {
+		return consumerIds[i] < consumerIds[j]
+	})
+	sort.Slice(actualConsumerIds, func(i, j int) bool {
+		return actualConsumerIds[i] < actualConsumerIds[j]
+	})
+	require.Equal(t, consumerIds, actualConsumerIds)
 }
 
-func (suite *KeeperTestSuite) TestHandleSlashPacketErrors() {
-	providerStakingKeeper := suite.providerChain.App.(*appProvider.App).StakingKeeper
-	ProviderKeeper := suite.providerChain.App.(*appProvider.App).ProviderKeeper
-	providerSlashingKeeper := suite.providerChain.App.(*appProvider.App).SlashingKeeper
-	consumerChainID := suite.consumerChain.ChainID
+// TestGetAllChannelToChains tests GetAllChannelToConsumers behaviour correctness
+func TestGetAllChannelToChains(t *testing.T) {
+	pk, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
-	// sync contexts block height
-	suite.ctx = suite.providerChain.GetContext()
+	consumerIds := []string{"2", "1", "4", "3"}
+	var expectedGetAllOrder []struct {
+		ChannelId  string
+		ConsumerId string
+	}
 
-	// expect an error if initial block height isn't set for consumer chain
-	err := ProviderKeeper.HandleSlashPacket(suite.ctx, consumerChainID, ccv.SlashPacketData{})
-	suite.Require().Error(err, "slash validator with invalid infraction")
+	for i, consumerId := range consumerIds {
+		channelID := fmt.Sprintf("client-%d", len(consumerIds)-i)
+		pk.SetChannelToConsumerId(ctx, channelID, consumerId)
+		expectedGetAllOrder = append(expectedGetAllOrder, struct {
+			ChannelId  string
+			ConsumerId string
+		}{ConsumerId: consumerId, ChannelId: channelID})
+	}
+	// sorting by channelID
+	sort.Slice(expectedGetAllOrder, func(i, j int) bool {
+		return expectedGetAllOrder[i].ChannelId < expectedGetAllOrder[j].ChannelId
+	})
 
-	// save VSC ID
-	vID := ProviderKeeper.GetValidatorSetUpdateId(suite.ctx)
-
-	// set faulty block height for current VSC ID
-	ProviderKeeper.SetValsetUpdateBlockHeight(suite.ctx, vID, 0)
-
-	// expect an error if block height mapping VSC ID is zero
-	err = ProviderKeeper.HandleSlashPacket(suite.ctx, consumerChainID, ccv.SlashPacketData{ValsetUpdateId: vID})
-	suite.Require().Error(err, "did slash unknown validator")
-
-	// construct slashing packet with non existing validator
-	slashingPkt := ccv.NewSlashPacketData(
-		abci.Validator{Address: ed25519.GenPrivKey().PubKey().Address(),
-			Power: int64(0)}, uint64(0), stakingtypes.Downtime,
-	)
-
-	// Set initial block height for consumer chain
-	ProviderKeeper.SetInitChainHeight(suite.ctx, consumerChainID, uint64(suite.ctx.BlockHeight()))
-
-	//expect an error if validator doesn't exist
-	err = ProviderKeeper.HandleSlashPacket(suite.ctx, consumerChainID, slashingPkt)
-	suite.Require().Error(err, "did slash unknown validator")
-
-	// jail an existing validator
-	val := suite.providerChain.Vals.Validators[0]
-	consAddr := sdk.ConsAddress(val.Address)
-	providerStakingKeeper.Jail(suite.ctx, consAddr)
-	// commit block to set VSC ID
-	suite.coordinator.CommitBlock(suite.providerChain)
-	// Update suite.ctx bc CommitBlock updates only providerChain's current header block height
-	suite.ctx = suite.providerChain.GetContext()
-	suite.Require().NotZero(ProviderKeeper.GetValsetUpdateBlockHeight(suite.ctx, vID))
-
-	// create validator signing info
-	valInfo := slashingtypes.NewValidatorSigningInfo(sdk.ConsAddress(val.Address), suite.ctx.BlockHeight(),
-		suite.ctx.BlockHeight()-1, time.Time{}.UTC(), false, int64(0))
-	providerSlashingKeeper.SetValidatorSigningInfo(suite.ctx, sdk.ConsAddress(val.Address), valInfo)
-
-	// update validator address and VSC ID
-	slashingPkt.Validator.Address = val.Address
-	slashingPkt.ValsetUpdateId = vID
-
-	// expect to slash and jail validator
-	err = ProviderKeeper.HandleSlashPacket(suite.ctx, consumerChainID, slashingPkt)
-	suite.Require().NoError(err, "did slash jail validator")
-
-	// expect error when infraction type in unspecified
-	tmAddr := suite.providerChain.Vals.Validators[1].Address
-	slashingPkt.Validator.Address = tmAddr
-	slashingPkt.Infraction = stakingtypes.InfractionEmpty
-
-	valInfo.Address = sdk.ConsAddress(tmAddr).String()
-	providerSlashingKeeper.SetValidatorSigningInfo(suite.ctx, sdk.ConsAddress(tmAddr), valInfo)
-
-	err = ProviderKeeper.HandleSlashPacket(suite.ctx, consumerChainID, slashingPkt)
-	suite.Require().EqualError(err, fmt.Sprintf("invalid infraction type: %v", stakingtypes.InfractionEmpty))
-
-	// expect to slash jail and tombstone validator
-	slashingPkt.Infraction = stakingtypes.DoubleSign
-	err = ProviderKeeper.HandleSlashPacket(suite.ctx, consumerChainID, slashingPkt)
-	suite.Require().NoError(err)
-
-	// expect error when validator is tombstoned
-	err = ProviderKeeper.HandleSlashPacket(suite.ctx, consumerChainID, slashingPkt)
-	suite.Require().Error(err)
+	result := pk.GetAllChannelToConsumers(ctx)
+	require.Len(t, result, len(consumerIds))
+	require.Equal(t, expectedGetAllOrder, result)
 }
 
-// TestHandleSlashPacketDistribution tests the slashing of an undelegation balance
-// by varying the slash packet VSC ID mapping to infraction heights
-// lesser, equal or greater than the undelegation entry creation height
-func (suite *KeeperTestSuite) TestHandleSlashPacketDistribution() {
-	providerStakingKeeper := suite.providerChain.App.(*appProvider.App).StakingKeeper
-	providerKeeper := suite.providerChain.App.(*appProvider.App).ProviderKeeper
+// TestSetSlashLog tests slash log getter and setter methods
+func TestSetSlashLog(t *testing.T) {
+	providerKeeper, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
-	// choose a validator
-	tmValidator := suite.providerChain.Vals.Validators[0]
-	valAddr, err := sdk.ValAddressFromHex(tmValidator.Address.String())
-	suite.Require().NoError(err)
+	addrWithDoubleSigns := cryptotestutil.NewCryptoIdentityFromIntSeed(1).ProviderConsAddress()
+	addrWithoutDoubleSigns := cryptotestutil.NewCryptoIdentityFromIntSeed(2).ProviderConsAddress()
 
-	validator, found := providerStakingKeeper.GetValidator(suite.providerChain.GetContext(), valAddr)
-	suite.Require().True(found)
+	providerKeeper.SetSlashLog(ctx, addrWithDoubleSigns)
+	require.True(t, providerKeeper.GetSlashLog(ctx, addrWithDoubleSigns))
+	require.False(t, providerKeeper.GetSlashLog(ctx, addrWithoutDoubleSigns))
+}
 
-	// unbonding operations parameters
-	delAddr := suite.providerChain.SenderAccount.GetAddress()
-	bondAmt := sdk.NewInt(1000000)
+// TestConsumerCommissionRate tests the `SetConsumerCommissionRate`, `GetConsumerCommissionRate`, and `DeleteConsumerCommissionRate` methods
+func TestConsumerCommissionRate(t *testing.T) {
+	providerKeeper, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
-	// new delegator shares used
-	testShares := sdk.Dec{}
+	providerAddr1 := providertypes.NewProviderConsAddress([]byte("providerAddr1"))
+	providerAddr2 := providertypes.NewProviderConsAddress([]byte("providerAddr2"))
 
-	// setup the test with a delegation, a no-op and an undelegation
-	setupOperations := []struct {
-		fn func(suite *KeeperTestSuite) error
-	}{
-		{
-			func(suite *KeeperTestSuite) error {
-				testShares, err = providerStakingKeeper.Delegate(suite.providerChain.GetContext(), delAddr, bondAmt, stakingtypes.Unbonded, stakingtypes.Validator(validator), true)
-				return err
-			},
-		}, {
-			func(suite *KeeperTestSuite) error {
-				return nil
-			},
-		}, {
-			// undelegate a quarter of the new shares created
-			func(suite *KeeperTestSuite) error {
-				_, err = providerStakingKeeper.Undelegate(suite.providerChain.GetContext(), delAddr, valAddr, testShares.QuoInt64(4))
-				return err
-			},
-		},
+	cr, found := providerKeeper.GetConsumerCommissionRate(ctx, CONSUMER_ID, providerAddr1)
+	require.False(t, found)
+	require.Equal(t, math.LegacyZeroDec(), cr)
+
+	providerKeeper.SetConsumerCommissionRate(ctx, CONSUMER_ID, providerAddr1, math.LegacyOneDec())
+	cr, found = providerKeeper.GetConsumerCommissionRate(ctx, CONSUMER_ID, providerAddr1)
+	require.True(t, found)
+	require.Equal(t, math.LegacyOneDec(), cr)
+
+	providerKeeper.SetConsumerCommissionRate(ctx, CONSUMER_ID, providerAddr2, math.LegacyZeroDec())
+	cr, found = providerKeeper.GetConsumerCommissionRate(ctx, CONSUMER_ID, providerAddr2)
+	require.True(t, found)
+	require.Equal(t, math.LegacyZeroDec(), cr)
+
+	provAddrs := providerKeeper.GetAllCommissionRateValidators(ctx, CONSUMER_ID)
+	require.Len(t, provAddrs, 2)
+
+	for _, addr := range provAddrs {
+		providerKeeper.DeleteConsumerCommissionRate(ctx, CONSUMER_ID, addr)
 	}
 
-	// execute the setup operations, distributed uniformly in three blocks.
-	// For each of them, save their current VSC Id value which map correspond respectively
-	// to the block heights lesser, equal and greater than the undelegation creation height.
-	vscIDs := make([]uint64, 0, 3)
-	for _, so := range setupOperations {
-		err := so.fn(suite)
-		suite.Require().NoError(err)
+	_, found = providerKeeper.GetConsumerCommissionRate(ctx, CONSUMER_ID, providerAddr1)
+	require.False(t, found)
 
-		vscIDs = append(vscIDs, providerKeeper.GetValidatorSetUpdateId(suite.providerChain.GetContext()))
-		suite.providerChain.NextBlock()
-	}
+	_, found = providerKeeper.GetConsumerCommissionRate(ctx, CONSUMER_ID, providerAddr2)
+	require.False(t, found)
+}
 
-	// create validator signing info to test slashing
-	suite.providerChain.App.(*appProvider.App).SlashingKeeper.SetValidatorSigningInfo(
-		suite.providerChain.GetContext(),
-		sdk.ConsAddress(tmValidator.Address),
-		slashingtypes.ValidatorSigningInfo{Address: tmValidator.Address.String()},
-	)
+// TestConsumerClientId tests the getter, setter, and deletion of the client id <> consumer id mappings
+func TestConsumerClientId(t *testing.T) {
+	providerKeeper, ctx, ctrl, _ := testkeeper.GetProviderKeeperAndCtx(t, testkeeper.NewInMemKeeperParams(t))
+	defer ctrl.Finish()
 
-	// the test cases verify that only the unbonding tokens get slashed for the VSC ids
-	// mapping to the block heights before and during the undelegation otherwise not.
-	testCases := []struct {
-		expSlash bool
-		vscID    uint64
-	}{
-		{expSlash: true, vscID: vscIDs[0]},
-		{expSlash: true, vscID: vscIDs[1]},
-		{expSlash: false, vscID: vscIDs[2]},
-	}
+	consumerId := "123"
+	clientIds := []string{"clientId1", "clientId2"}
 
-	// save unbonding balance before slashing tests
-	ubd, found := providerStakingKeeper.GetUnbondingDelegation(suite.providerChain.GetContext(), delAddr, valAddr)
-	suite.Require().True(found)
-	ubdBalance := ubd.Entries[0].Balance
+	_, found := providerKeeper.GetConsumerClientId(ctx, consumerId)
+	require.False(t, found)
+	_, found = providerKeeper.GetClientIdToConsumerId(ctx, clientIds[0])
+	require.False(t, found)
+	_, found = providerKeeper.GetClientIdToConsumerId(ctx, clientIds[1])
+	require.False(t, found)
 
-	for _, tc := range testCases {
-		slashPacket := ccv.NewSlashPacketData(
-			abci.Validator{Address: tmValidator.Address, Power: tmValidator.VotingPower},
-			tc.vscID,
-			stakingtypes.Downtime,
-		)
+	providerKeeper.SetConsumerClientId(ctx, consumerId, clientIds[0])
+	res, found := providerKeeper.GetConsumerClientId(ctx, consumerId)
+	require.True(t, found)
+	require.Equal(t, clientIds[0], res)
+	res, found = providerKeeper.GetClientIdToConsumerId(ctx, clientIds[0])
+	require.True(t, found)
+	require.Equal(t, consumerId, res)
+	_, found = providerKeeper.GetClientIdToConsumerId(ctx, clientIds[1])
+	require.False(t, found)
 
-		// slash
-		err := providerKeeper.HandleSlashPacket(suite.providerChain.GetContext(), suite.consumerChain.ChainID, slashPacket)
-		suite.Require().NoError(err)
+	// overwrite the client ID
+	providerKeeper.SetConsumerClientId(ctx, consumerId, clientIds[1])
+	res, found = providerKeeper.GetConsumerClientId(ctx, consumerId)
+	require.True(t, found)
+	require.Equal(t, clientIds[1], res)
+	res, found = providerKeeper.GetClientIdToConsumerId(ctx, clientIds[1])
+	require.True(t, found)
+	require.Equal(t, consumerId, res)
+	_, found = providerKeeper.GetClientIdToConsumerId(ctx, clientIds[0])
+	require.False(t, found)
 
-		ubd, found := providerStakingKeeper.GetUnbondingDelegation(suite.providerChain.GetContext(), delAddr, valAddr)
-		suite.Require().True(found)
-
-		isUbdSlashed := ubdBalance.GT(ubd.Entries[0].Balance)
-		suite.Require().True(tc.expSlash == isUbdSlashed)
-
-		// update balance
-		ubdBalance = ubd.Entries[0].Balance
-	}
+	providerKeeper.DeleteConsumerClientId(ctx, consumerId)
+	_, found = providerKeeper.GetConsumerClientId(ctx, consumerId)
+	require.False(t, found)
+	_, found = providerKeeper.GetClientIdToConsumerId(ctx, clientIds[0])
+	require.False(t, found)
+	_, found = providerKeeper.GetClientIdToConsumerId(ctx, clientIds[1])
+	require.False(t, found)
 }

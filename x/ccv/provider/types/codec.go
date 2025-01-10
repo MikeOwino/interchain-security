@@ -1,23 +1,70 @@
 package types
 
 import (
+	"github.com/cosmos/ibc-go/v8/modules/core/exported"
+	tendermint "github.com/cosmos/ibc-go/v8/modules/light-clients/07-tendermint"
+
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
-	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/msgservice"
+	govv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
 )
 
-// RegisterLegacyAminoCodec registers the necessary x/ibc transfer interfaces and concrete types
-// on the provided LegacyAmino codec. These types are used for Amino JSON serialization.
 func RegisterLegacyAminoCodec(cdc *codec.LegacyAmino) {
 }
 
-// RegisterInterfaces register the ibc transfer module interfaces to protobuf
-// Any.
+// RegisterInterfaces registers the provider proposal structs to the interface registry
 func RegisterInterfaces(registry codectypes.InterfaceRegistry) {
 	registry.RegisterImplementations(
-		(*govtypes.Content)(nil),
-		&CreateConsumerChainProposal{},
+		(*govv1beta1.Content)(nil),
+		&ConsumerAdditionProposal{},
+		&ConsumerRemovalProposal{},
+		&ConsumerModificationProposal{},
+		&ChangeRewardDenomsProposal{},
 	)
+	registry.RegisterImplementations(
+		(*sdk.Msg)(nil),
+		&MsgConsumerAddition{},
+		&MsgConsumerRemoval{},
+		&MsgConsumerModification{},
+		&MsgAssignConsumerKey{},
+		&MsgCreateConsumer{},
+		&MsgUpdateConsumer{},
+		&MsgRemoveConsumer{},
+		&MsgChangeRewardDenoms{},
+		&MsgUpdateParams{},
+	)
+	// keep so existing proposals can be correctly deserialized
+	registry.RegisterImplementations(
+		(*govv1beta1.Content)(nil),
+		&EquivocationProposal{},
+	)
+	registry.RegisterImplementations(
+		(*sdk.Msg)(nil),
+		&MsgSubmitConsumerMisbehaviour{},
+	)
+	registry.RegisterImplementations(
+		(*sdk.Msg)(nil),
+		&MsgSubmitConsumerDoubleVoting{},
+	)
+	registry.RegisterImplementations(
+		(*sdk.Msg)(nil),
+		&MsgOptIn{},
+	)
+	registry.RegisterImplementations(
+		(*sdk.Msg)(nil),
+		&MsgOptOut{},
+	)
+	registry.RegisterImplementations(
+		(*exported.ClientMessage)(nil),
+		&tendermint.Misbehaviour{},
+	)
+	registry.RegisterImplementations(
+		(*sdk.Msg)(nil),
+		&MsgSetConsumerCommissionRate{},
+	)
+	msgservice.RegisterMsgServiceDesc(registry, &_Msg_serviceDesc)
 }
 
 var (
@@ -29,9 +76,6 @@ var (
 	// The actual codec used for serialization should be provided to x/ibc transfer and
 	// defined at the application level.
 	ModuleCdc = codec.NewProtoCodec(codectypes.NewInterfaceRegistry())
-
-	// AminoCdc is a amino codec created to support amino json compatible msgs.
-	AminoCdc = codec.NewAminoCodec(amino)
 )
 
 func init() {

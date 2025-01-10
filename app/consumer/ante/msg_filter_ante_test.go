@@ -3,13 +3,14 @@ package ante_test
 import (
 	"testing"
 
+	ibcclienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
+	"github.com/stretchr/testify/require"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	ibcclienttypes "github.com/cosmos/ibc-go/v3/modules/core/02-client/types"
-	appconsumer "github.com/cosmos/interchain-security/app/consumer"
-	"github.com/cosmos/interchain-security/app/consumer/ante"
-	"github.com/stretchr/testify/require"
-	"github.com/tendermint/spm/cosmoscmd"
+
+	"github.com/cosmos/interchain-security/v6/app/consumer/ante"
+	appencoding "github.com/cosmos/interchain-security/v6/app/encoding"
 )
 
 type consumerKeeper struct {
@@ -27,7 +28,7 @@ func noOpAnteDecorator() sdk.AnteHandler {
 }
 
 func TestMsgFilterDecorator(t *testing.T) {
-	txCfg := cosmoscmd.MakeEncodingConfig(appconsumer.ModuleBasics).TxConfig
+	txCfg := appencoding.MakeTestEncodingConfig().TxConfig
 
 	testCases := []struct {
 		name           string

@@ -1,0 +1,31 @@
+name: Run Gosec
+on:
+  pull_request:
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+    branches:
+      - main
+      - feat/*
+  push:
+    branches:
+      - main
+      - feat/*
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+
+jobs:
+  Gosec:
+    runs-on: ubuntu-latest
+    env:
+      GO111MODULE: on
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: "-exclude=G115 -exclude-dir=tests -exclude-dir=testutil -exclude-dir=app -exclude-generated ./..."

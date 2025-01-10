@@ -4,12 +4,16 @@ import (
 	"testing"
 	"time"
 
-	clienttypes "github.com/cosmos/ibc-go/v3/modules/core/02-client/types"
-	commitmenttypes "github.com/cosmos/ibc-go/v3/modules/core/23-commitment/types"
-	ibctmtypes "github.com/cosmos/ibc-go/v3/modules/light-clients/07-tendermint/types"
+	clienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
+	commitmenttypes "github.com/cosmos/ibc-go/v8/modules/core/23-commitment/types"
+	ibctmtypes "github.com/cosmos/ibc-go/v8/modules/light-clients/07-tendermint"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cosmos/interchain-security/x/ccv/provider/types"
+	"cosmossdk.io/math"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
+
+	"github.com/cosmos/interchain-security/v6/x/ccv/provider/types"
 )
 
 func TestValidateParams(t *testing.T) {
@@ -19,12 +23,39 @@ func TestValidateParams(t *testing.T) {
 		expPass bool
 	}{
 		{"default params", types.DefaultParams(), true},
-		{"custom valid params", types.NewParams(ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
-			time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}, true, false)), true},
-		{"custom invalid params", types.NewParams(ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
-			0, clienttypes.Height{}, nil, []string{"ibc", "upgradedIBCState"}, true, false)), false},
-		{"blank client", types.NewParams(&ibctmtypes.ClientState{}), false},
-		{"nil client", types.NewParams(nil), false},
+		{"custom valid params", types.NewParams(
+			ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+				time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}),
+			"0.33", time.Hour, 30*time.Minute, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 24, 180), true},
+		{"custom invalid params", types.NewParams(
+			ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+				0, clienttypes.Height{}, nil, []string{"ibc", "upgradedIBCState"}),
+			"0.33", time.Hour, 30*time.Minute, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 24, 180), false},
+		{"blank client", types.NewParams(&ibctmtypes.ClientState{},
+			"0.33", time.Hour, 30*time.Minute, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 24, 180), false},
+		{"nil client", types.NewParams(nil, "0.33", time.Hour, 30*time.Minute, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 24, 180), false},
+		{"0 trusting period fraction", types.NewParams(ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+			time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}),
+			"0.00", time.Hour, 30*time.Minute, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 24, 180), false},
+		{"0 ccv timeout period", types.NewParams(ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+			time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}),
+			"0.33", 0, 30*time.Minute, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 24, 180), false},
+		{"0 slash meter replenish period", types.NewParams(ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+			time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}),
+			"0.33", time.Hour, 0, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 24, 180), false},
+		{"slash meter replenish fraction over 1", types.NewParams(ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+			time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}),
+			"0.33", time.Hour, time.Hour, "1.5", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 24, 180), false},
+		{"invalid consumer reward denom registration fee denom", types.NewParams(ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+			time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}),
+			"0.33", time.Hour, time.Hour, "0.1", sdk.Coin{Denom: "st", Amount: math.NewInt(10000000)}, 1000, 24, 180), false},
+		{"invalid consumer reward denom registration fee amount", types.NewParams(ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+			time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}),
+			"0.33", time.Hour, time.Hour, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(-10000000)}, 1000, 24, 180), false},
+		{"invalid number of epochs to start receiving rewards", types.NewParams(
+			ibctmtypes.NewClientState("", ibctmtypes.DefaultTrustLevel, 0, 0,
+				time.Second*40, clienttypes.Height{}, commitmenttypes.GetSDKSpecs(), []string{"ibc", "upgradedIBCState"}),
+			"0.33", time.Hour, 30*time.Minute, "0.1", sdk.Coin{Denom: "stake", Amount: math.NewInt(10000000)}, 1000, 0, 180), false},
 	}
 
 	for _, tc := range testCases {

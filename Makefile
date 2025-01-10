@@ -1,15 +1,202 @@
 #!/usr/bin/make -f
 
+BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
+COMMIT := $(shell git log -1 --format='%H')
+# Fetch tags and get the latest ICS version by filtering tags by vX.Y.Z and vX.Y.Z-lsm
+# using lazy set to only execute commands when variable is used
+LATEST_RELEASE ?= $(shell git fetch; git tag -l --sort -v:refname 'v*.?' 'v*.?'-lsm 'v*.??' 'v*.??'-lsm  | head -n 1)
+
+# don't override user values
+ifeq (,$(VERSION))
+  VERSION := $(shell git describe --exact-match 2>/dev/null)
+  # if VERSION is empty, then populate it with branch's name and raw commit hash
+  ifeq (,$(VERSION))
+    VERSION := $(BRANCH)-$(COMMIT)
+  endif
+endif
+
+sharedFlags = -X github.com/cosmos/cosmos-sdk/version.Version=$(VERSION) \
+		  -X github.com/cosmos/cosmos-sdk/version.Commit=$(COMMIT)
+
+providerFlags := $(sharedFlags) -X github.com/cosmos/cosmos-sdk/version.AppName=interchain-security-pd -X github.com/cosmos/cosmos-sdk/version.Name=interchain-security-pd
+consumerFlags := $(sharedFlags) -X github.com/cosmos/cosmos-sdk/version.AppName=interchain-security-cd -X github.com/cosmos/cosmos-sdk/version.Name=interchain-security-cd
+democracyFlags := $(sharedFlags) -X github.com/cosmos/cosmos-sdk/version.AppName=interchain-security-cdd -X github.com/cosmos/cosmos-sdk/version.Name=interchain-security-cdd
+standaloneFlags := $(sharedFlags) -X github.com/cosmos/cosmos-sdk/version.AppName=interchain-security-sd -X github.com/cosmos/cosmos-sdk/version.Name=interchain-security-sd
+
 install: go.sum
 		export GOFLAGS='-buildmode=pie'
 		export CGO_CPPFLAGS="-D_FORTIFY_SOURCE=2"
 		export CGO_LDFLAGS="-Wl,-z,relro,-z,now -fstack-protector"
-		go install $(BUILD_FLAGS) ./cmd/interchain-security-pd
-		go install $(BUILD_FLAGS) ./cmd/interchain-security-cd
+		go install -ldflags "$(providerFlags)" ./cmd/interchain-security-pd
+		go install -ldflags "$(consumerFlags)" ./cmd/interchain-security-cd
+		go install -ldflags "$(democracyFlags)" ./cmd/interchain-security-cdd
+		go install -ldflags "$(standaloneFlags)" ./cmd/interchain-security-sd
 
-test: 
-	go test ./...
+# run all tests: unit, integration, and E2E
+test: test-unit test-integration test-e2e
 
+# shortcut for local development
+test-dev: test-unit test-integration test-mbt
+
+# run unit tests
+test-unit:
+	go test ./x/... ./app/...
+
+test-unit-cov:
+	go test ./x/... ./app/... -coverpkg=./... -coverprofile=profile.out -covermode=atomic
+
+# run unit and integration tests
+test-integration:
+	go test ./tests/integration/... -timeout 30m
+
+test-integration-cov:
+	go test ./tests/integration/... -timeout 30m -coverpkg=./... -coverprofile=integration-profile.out -covermode=atomic
+
+# run interchain tests
+# we can use PROVIDER_IMAGE_TAG, PROVIDER_IMAGE_NAME, CONSUMER_IMAGE_TAG, CONSUMER_IMAGE_NAME, SOVEREIGN_IMAGE_TAG, and SOVEREIGN_IMAGE_NAME to run 
+# tests with desired docker images, including locally built ones that, for example, contain some of our changes that are not yet on the main branch.
+# if not provided, default value for image tag is "latest" and for image name is "ghcr.io/cosmos/interchain-security"
+test-interchain:
+	cd tests/interchain && \
+	PROVIDER_IMAGE_NAME=$(PROVIDER_IMAGE_NAME) \
+	PROVIDER_IMAGE_TAG=$(PROVIDER_IMAGE_TAG) \
+	SOVEREIGN_IMAGE_NAME=$(SOVEREIGN_IMAGE_NAME) \
+	SOVEREIGN_IMAGE_TAG=$(SOVEREIGN_IMAGE_TAG) \
+	CONSUMER_IMAGE_NAME=$(CONSUMER_IMAGE_NAME) \
+	CONSUMER_IMAGE_TAG=$(CONSUMER_IMAGE_TAG) \
+	go test ./... -timeout 30m -v
+
+# run mbt tests
+test-mbt:
+	cd tests/mbt/driver;\
+	sh generate_traces.sh;\
+	cd ../../..;\
+	go test ./tests/mbt/... -timeout 30m
+
+test-mbt-cov:
+	cd tests/mbt/driver;\
+	sh generate_traces.sh;\
+	cd ../../..;\
+	go test ./tests/mbt/... -timeout 30m -coverpkg=./... -coverprofile=mbt-profile.out -covermode=atomic
+
+# runs mbt tests, but generates more traces
+test-mbt-more-traces:
+	cd tests/mbt/driver;\
+	sh generate_more_traces.sh;\
+	cd ../../..;\
+	go test ./tests/mbt/... -timeout 30m
+
+# run E2E tests
+test-e2e:
+	go run ./tests/e2e/...
+
+# run only happy path E2E tests
+test-e2e-short:
+	go run ./tests/e2e/... --tc happy-path
+
+# run only happy path E2E tests with cometmock
+# this set of traces does not test equivocation but it does check downtime
+test-e2e-short-cometmock:
+	go run ./tests/e2e/... --tc happy-path-short --use-cometmock --use-gorelayer
+
+# run minimal set of traces with cometmock and gaia
+test-e2e-short-cometmock-gaia:
+	go run ./tests/e2e/... --tc happy-path-short --use-cometmock --use-gorelayer --use-gaia
+
+# run full E2E tests in sequence (including multiconsumer)
+test-e2e-multi-consumer:
+	go run ./tests/e2e/... --include-multi-consumer
+
+# run full E2E tests in parallel (including multiconsumer)
+test-e2e-parallel:
+	go run ./tests/e2e/... --include-multi-consumer --parallel
+
+# run E2E compatibility tests against consumer running latest release
+test-e2e-compatibility-tests-latest:
+	go run ./tests/e2e/... --tc compatibility -cv $(LATEST_RELEASE)
+
+# run full E2E tests in sequence (including multiconsumer) using latest tagged gaia
+test-gaia-e2e:
+	go run ./tests/e2e/... --include-multi-consumer --use-gaia
+
+# run only happy path E2E tests using latest tagged gaia
+test-gaia-e2e-short:
+	go run ./tests/e2e/... --tc happy-path --use-gaia
+
+# run full E2E tests in parallel (including multiconsumer) using latest tagged gaia
+test-gaia-e2e-parallel:
+	go run ./tests/e2e/... --include-multi-consumer --parallel --use-gaia
+
+# run full E2E tests in sequence (including multiconsumer) using specific tagged version of gaia
+# usage: GAIA_TAG=v9.0.0 make test-gaia-e2e-tagged
+test-gaia-e2e-tagged:
+	go run ./tests/e2e/... --include-multi-consumer --use-gaia --gaia-tag $(GAIA_TAG)
+
+# run only happy path E2E tests using latest tagged gaia
+# usage: GAIA_TAG=v9.0.0 make test-gaia-e2e-short-tagged
+test-gaia-e2e-short-tagged:
+	go run ./tests/e2e/... --tc happy-path --use-gaia --gaia-tag $(GAIA_TAG)
+
+# run full E2E tests in parallel (including multiconsumer) using specific tagged version of gaia
+# usage: GAIA_TAG=v9.0.0 make test-gaia-e2e-parallel-tagged
+test-gaia-e2e-parallel-tagged:
+	go run ./tests/e2e/... --include-multi-consumer --parallel --use-gaia --gaia-tag $(GAIA_TAG)
+
+# run all tests with caching disabled
+test-no-cache:
+	go test ./... -count=1 && go run ./tests/e2e/...
+
+# test reading a trace from a file
+test-trace:
+	go run ./tests/e2e/... --test-file tests/e2e/tracehandler_testdata/happyPath.json::default
+
+# tests and verifies the Quint models.
+# Note: this is *not* using the Quint models to test the system,
+# this tests/verifies the Quint models *themselves*.
+verify-models:
+	cd tests/mbt/model;\
+	../run_invariants.sh
+
+
+###############################################################################
+###                         Simulation tests                                ###
+
+# Run a full simulation test
+sim-full:
+	cd app/provider;\
+	go test -mod=readonly . -run=^TestFullAppSimulation$  -Enabled=true -NumBlocks=500 -BlockSize=200 -Commit=true -timeout 24h -v
+
+# Run full simulation without any inactive validators
+sim-full-no-inactive-vals:
+	cd app/provider;\
+	go test -mod=readonly . -run=^TestFullAppSimulation$  -Enabled=true -NumBlocks=500 -BlockSize=200 -Commit=true -timeout 24h -Params=no_inactive_vals_params.json -v
+
+
+###############################################################################
+###                                Linting                                  ###
+###############################################################################
+golangci_lint_cmd=golangci-lint
+golangci_version=v1.60.1
+
+lint:
+	@echo "--> Running linter"
+	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(golangci_version)
+	@$(golangci_lint_cmd) run  ./... --config .golangci.yml
+
+format:
+	@go install mvdan.cc/gofumpt@latest
+	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(golangci_version)
+	find . -name '*.go' -type f -not -path "./vendor*" -not -path "*.git*" -not -path "./client/docs/statik/statik.go" -not -path "./tests/mocks/*" -not -name "*.pb.go" -not -name "*.pb.gw.go" -not -name "*.pulsar.go" -not -path "./crypto/keys/secp256k1/*" | xargs gofumpt -w -l
+	$(golangci_lint_cmd) run --fix --config .golangci.yml
+
+.PHONY: format
+
+mockgen_cmd=go run github.com/golang/mock/mockgen
+mocks:
+	$(mockgen_cmd) -package=keeper -destination=testutil/keeper/mocks.go -source=x/ccv/types/expected_keepers.go
+
+
+BUILDDIR ?= $(CURDIR)/build
 BUILD_TARGETS := build
 
 build: BUILD_ARGS=-o $(BUILDDIR)/
@@ -24,101 +211,80 @@ $(BUILDDIR)/:
 ###                                Protobuf                                 ###
 ###############################################################################
 
-containerProtoVer=v0.7
-containerProtoImage=tendermintdev/sdk-proto-gen:$(containerProtoVer)
-containerProtoGen=cosmos-sdk-proto-gen-$(containerProtoVer)
-containerProtoGenSwagger=cosmos-sdk-proto-gen-swagger-$(containerProtoVer)
-containerProtoFmt=cosmos-sdk-proto-fmt-$(containerProtoVer)
+DOCKER := $(shell which docker)
+HTTPS_GIT := https://github.com/cosmos/interchain-security.git
+
+containerProtoVer=0.14.0
+containerProtoImage=ghcr.io/cosmos/proto-builder:$(containerProtoVer)
+
+protoImage=$(DOCKER) run --rm -v $(CURDIR):/workspace --workdir /workspace $(containerProtoImage)
+
 
 proto-all: proto-format proto-lint proto-gen
 
 proto-gen:
 	@echo "Generating Protobuf files"
-	@if docker ps -a --format '{{.Names}}' | grep -Eq "^${containerProtoGen}$$"; then docker start -a $(containerProtoGen); else docker run --name $(containerProtoGen) -v $(CURDIR):/workspace --workdir /workspace $(containerProtoImage) \
-		sh ./scripts/protocgen.sh; fi
+	@$(protoImage) sh ./scripts/protocgen.sh;
+
+proto-check:
+	@if git diff --quiet --exit-code main...HEAD -- proto; then \
+		echo "Pass! No committed changes found in /proto directory between the currently checked out branch and main."; \
+	else \
+		echo "Committed changes found in /proto directory between the currently checked out branch and main."; \
+		modified_protos=$$(git diff --name-only main...HEAD proto); \
+		modified_pb_files= ; \
+        for proto_file in $${modified_protos}; do \
+            proto_name=$$(basename "$${proto_file}" .proto); \
+            pb_files=$$(find x/ccv -name "$${proto_name}.pb.go"); \
+            for pb_file in $${pb_files}; do \
+                if git diff --quiet --exit-code main...HEAD -- "$${pb_file}"; then \
+                    echo "Missing committed changes in $${pb_file}"; \
+					exit 1; \
+                else \
+                    modified_pb_files+="$${pb_file} "; \
+                fi \
+            done \
+        done; \
+		echo "Pass! Correctly modified pb files: "; \
+		echo $${modified_pb_files}; \
+    fi
 
 proto-format:
 	@echo "Formatting Protobuf files"
-	@if docker ps -a --format '{{.Names}}' | grep -Eq "^${containerProtoFmt}$$"; then docker start -a $(containerProtoFmt); else docker run --name $(containerProtoFmt) -v $(CURDIR):/workspace --workdir /workspace tendermintdev/docker-build-proto \
-		find ./ -not -path "./third_party/*" -name "*.proto" -exec clang-format -i {} \; ; fi
+	@$(protoImage) find ./ -name "*.proto" -exec clang-format -i {} \;
 
 proto-swagger-gen:
 	@echo "Generating Protobuf Swagger"
-	@if docker ps -a --format '{{.Names}}' | grep -Eq "^${containerProtoGenSwagger}$$"; then docker start -a $(containerProtoGenSwagger); else docker run --name $(containerProtoGenSwagger) -v $(CURDIR):/workspace --workdir /workspace $(containerProtoImage) \
-		sh ./scripts/protoc-swagger-gen.sh; fi
+	@$(protoImage) sh ./scripts/protocgen.sh
 
 proto-lint:
-	@$(DOCKER_BUF) lint --error-format=json
+	@$(protoImage) buf lint --error-format=json
 
 proto-check-breaking:
-	@$(DOCKER_BUF) breaking --against $(HTTPS_GIT)#branch=main
-
-TM_URL              = https://raw.githubusercontent.com/tendermint/tendermint/v0.34.5/proto/tendermint
-GOGO_PROTO_URL      = https://raw.githubusercontent.com/regen-network/protobuf/cosmos
-CONFIO_URL          = https://raw.githubusercontent.com/confio/ics23/v0.7.1
-COSMOS_PROTO_URL    = https://raw.githubusercontent.com/regen-network/cosmos-proto/master
-SDK_PROTO_URL 		= https://raw.githubusercontent.com/cosmos/cosmos-sdk/interchain-security-rebase/proto/cosmos
-
-TM_CRYPTO_TYPES     = third_party/proto/tendermint/crypto
-TM_ABCI_TYPES       = third_party/proto/tendermint/abci
-TM_TYPES            = third_party/proto/tendermint/types
-TM_VERSION          = third_party/proto/tendermint/version
-TM_LIBS             = third_party/proto/tendermint/libs/bits
-TM_P2P              = third_party/proto/tendermint/p2p
-
-SDK_QUERY 			= third_party/proto/cosmos/base/query/v1beta1
-SDK_BASE 			= third_party/proto/cosmos/base/v1beta1
-SDK_UPGRADE			= third_party/proto/cosmos/upgrade/v1beta1
-SDK_STAKING			= third_party/proto/cosmos/staking/v1beta1
-
-GOGO_PROTO_TYPES    = third_party/proto/gogoproto
-CONFIO_TYPES        = third_party/proto/confio
-COSMOS_PROTO_TYPES  = third_party/proto/cosmos_proto
+	@$(protoImage) buf breaking --against $(HTTPS_GIT)#branch=main
 
 proto-update-deps:
-	@mkdir -p $(COSMOS_PROTO_TYPES)
-	@curl -sSL $(COSMOS_PROTO_URL)/cosmos.proto > $(COSMOS_PROTO_TYPES)/cosmos.proto
+	@echo "Updating Protobuf dependencies"
+	$(protoImage) buf mod update
 
-	@mkdir -p $(SDK_QUERY)
-	@curl -sSL $(SDK_PROTO_URL)/base/query/v1beta1/pagination.proto > $(SDK_QUERY)/pagination.proto
+.PHONY: proto-all proto-gen proto-format proto-lint proto-check proto-check-breaking proto-update-deps mocks
 
-	@mkdir -p $(SDK_BASE)
-	@curl -sSL $(SDK_PROTO_URL)/base/v1beta1/coin.proto > $(SDK_BASE)/coin.proto
+###############################################################################
+###                              Documentation                              ###
+###############################################################################
 
-	@mkdir -p $(SDK_UPGRADE)
-	@curl -sSL $(SDK_PROTO_URL)/upgrade/v1beta1/upgrade.proto > $(SDK_UPGRADE)/upgrade.proto
+build-docs-deploy:
+	@cd docs && ./sync_versions.sh && ./build_deploy.sh
 
-	@mkdir -p $(SDK_STAKING)
-	@curl -sSL $(SDK_PROTO_URL)/staking/v1beta1/staking.proto > $(SDK_STAKING)/staking.proto
+build-docs-local:
+	@cd docs && ./build_local.sh
 
-## Importing of tendermint protobuf definitions currently requires the
-## use of `sed` in order to build properly with cosmos-sdk's proto file layout
-## (which is the standard Buf.build FILE_LAYOUT)
-## Issue link: https://github.com/tendermint/tendermint/issues/5021
-	@mkdir -p $(TM_TYPES)
-	@curl -sSL $(TM_URL)/types/types.proto > $(TM_TYPES)/types.proto
-	@curl -sSL $(TM_URL)/types/params.proto > $(TM_TYPES)/params.proto
-	@curl -sSL $(TM_URL)/types/validator.proto > $(TM_TYPES)/validator.proto
+build-testing-docs:
+	@cd scripts/test_doc && go run extract_docstrings.go
 
-	@mkdir -p $(TM_ABCI_TYPES)
-	@curl -sSL $(TM_URL)/abci/types.proto > $(TM_ABCI_TYPES)/types.proto
+###############################################################################
+### 							Test Traces									###
+###############################################################################
 
-	@mkdir -p $(TM_VERSION)
-	@curl -sSL $(TM_URL)/version/types.proto > $(TM_VERSION)/types.proto
-
-	@mkdir -p $(TM_LIBS)
-	@curl -sSL $(TM_URL)/libs/bits/types.proto > $(TM_LIBS)/types.proto
-
-	@mkdir -p $(TM_CRYPTO_TYPES)
-	@curl -sSL $(TM_URL)/crypto/proof.proto > $(TM_CRYPTO_TYPES)/proof.proto
-	@curl -sSL $(TM_URL)/crypto/keys.proto > $(TM_CRYPTO_TYPES)/keys.proto
-
-	@mkdir -p $(CONFIO_TYPES)
-	@curl -sSL $(CONFIO_URL)/proofs.proto > $(CONFIO_TYPES)/proofs.proto
-
-## insert go package option into proofs.proto file
-## Issue link: https://github.com/confio/ics23/issues/32
-	@perl -i -l -p -e 'print "option go_package = \"github.com/confio/ics23/go\";" if $$. == 4' $(CONFIO_TYPES)/proofs.proto
-
-.PHONY: proto-all proto-gen proto-gen-any proto-swagger-gen proto-format proto-lint proto-check-breaking proto-update-deps
-
+e2e-traces:
+	cd tests/e2e; go test -timeout 30s -run ^TestWriteExamples -v

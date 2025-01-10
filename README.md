@@ -1,66 +1,59 @@
 # Interchain Security
 
-**interchain-security** houses the code for implementing Interchain Security: https://blog.cosmos.network/interchain-security-is-coming-to-the-cosmos-hub-f144c45fb035. The repo is currently a WIP and targetting v1 of Interchain Security.
+[![Go Report Card](https://goreportcard.com/badge/github.com/cosmos/interchain-security)](https://goreportcard.com/report/github.com/cosmos/interchain-security)
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=cosmos_interchain-security&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=cosmos_interchain-security)
+[![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=cosmos_interchain-security&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=cosmos_interchain-security)
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=cosmos_interchain-security&metric=bugs)](https://sonarcloud.io/summary/new_code?id=cosmos_interchain-security)
+[![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=cosmos_interchain-security&metric=ncloc)](https://sonarcloud.io/summary/new_code?id=cosmos_interchain-security)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=cosmos_interchain-security&metric=coverage)](https://sonarcloud.io/summary/new_code?id=cosmos_interchain-security)
 
-CCV stands for cross chain validation and refers to the subset of Interchain Security related to the staking and slashing communication between the provider and consumer blockchains. The provider blockchain communicates staking changes to consumer blockchain(s), while the consumer blockchain may communicate slashing evidence to the provider blockchain.
+**interchain-security** contains a working and in-production implementation of the Interchain Security (ICS) protocol. ICS is an open sourced IBC application which allows cosmos blockchains to lease their proof-of-stake security to one another.
 
-The code for CCV is housed under [x/ccv](./x/ccv). The `types` folder contains types and related functions that are used by both provider and consumer chains, while the `consumer` module contains the code run by consumer chains and the `provider` module contains the code run by provider chain.
+For more details on the **Interchain Security protocol**, take a look at the [docs](https://cosmos.github.io/interchain-security/) or [technical specification](https://github.com/cosmos/ibc/blob/main/spec/app/ics-028-cross-chain-validation/README.md).
 
-NOTE: At the moment the testing app may not be functional, please rely on the IBC testing suite to write unit tests for the moment.
+For a list of **currently active releases**, see [RELEASES.md](./RELEASES.md#version-matrix).
 
-## Get started
+For a list of **major ICS features** available in the currently active releases, see [FEATURES.md](./FEATURES.md).
 
-```
-starport chain serve
-```
+## Instructions
 
-`serve` command installs dependencies, builds, initializes, and starts a testing blockchain in development.
+**Prerequisites**
 
-### Configure
+```bash
+## For OSX or Linux
 
-The testing blockchain in development can be configured with `config.yml`. To learn more, see the [Starport docs](https://docs.starport.network).
-
-### Launch
-
-To launch a testing blockchain live on multiple nodes, use `starport network` commands. Learn more about [Starport Network](https://github.com/tendermint/spn).
-
-### Web Frontend
-
-Starport has scaffolded a Vue.js-based web app in the `vue` directory. Run the following commands to install dependencies and start the app:
-
-```
-cd vue
-npm install
-npm run serve
-```
-
-The frontend app is built using the `@starport/vue` and `@starport/vuex` packages. For details, see the [monorepo for Starport front-end development](https://github.com/tendermint/vue).
-
-## Release
-To release a new version of your blockchain, create and push a new tag with `v` prefix. A new draft release with the configured targets will be created.
+# go 1.21 (https://formulae.brew.sh/formula/go)
+brew install go@1.21
+# jq (optional, for testnet) (https://formulae.brew.sh/formula/jq)
+brew install jq
+# docker (optional, for integration tests, testnet) (https://docs.docker.com/get-docker/)
 
 ```
-git tag v0.1
-git push origin v0.1
+
+**Installing and running binaries**
+
+```bash
+# install interchain-security-pd and interchain-security-cd binaries
+make install
+# run provider
+interchain-security-pd
+# run consumer
+interchain-security-cd
+# (if the above fail, ensure ~/go/bin on $PATH)
+export PATH=$PATH:$(go env GOPATH)/bin
 ```
 
-After a draft release is created, make your final changes from the release page and publish it.
+Inspect the [Makefile](./Makefile) if curious.
 
-### Install
-To install the latest version of your blockchain node's binary, execute the following command on your machine:
+## Testing
 
-```
-curl https://get.starport.network/cosmos/interchain-security@latest! | sudo bash
-```
-`cosmos/interchain-security` should match the `username` and `repo_name` of the Github repository to which the source code was pushed. Learn more about [the install process](https://github.com/allinbits/starport-installer).
+See [testing docs](./TESTING.md).
 
 ## Learn more
 
-- [IBC Docs](https://docs.cosmos.network/master/ibc/)
+- [IBC Docs](https://ibc.cosmos.network/)
 - [IBC Protocol](https://ibcprotocol.org/)
 - [IBC Specs](https://github.com/cosmos/ibc)
-- [Starport](https://github.com/tendermint/starport)
-- [Starport Docs](https://docs.starport.network)
 - [Cosmos SDK documentation](https://docs.cosmos.network)
 - [Cosmos SDK Tutorials](https://tutorials.cosmos.network)
 - [Discord](https://discord.gg/cosmosnetwork)

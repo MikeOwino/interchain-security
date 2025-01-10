@@ -1,32 +1,21 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
-	"github.com/cosmos/cosmos-sdk/server"
 	svrcmd "github.com/cosmos/cosmos-sdk/server/cmd"
-	app "github.com/cosmos/interchain-security/app/provider"
-	"github.com/tendermint/spm/cosmoscmd"
+
+	appparams "github.com/cosmos/interchain-security/v6/app/params"
+	app "github.com/cosmos/interchain-security/v6/app/provider"
+	"github.com/cosmos/interchain-security/v6/cmd/interchain-security-pd/cmd"
 )
 
 func main() {
-	rootCmd, _ := cosmoscmd.NewRootCmd(
-		app.AppName,
-		app.AccountAddressPrefix,
-		app.DefaultNodeHome,
-		app.AppName,
-		app.ModuleBasics,
-		app.New,
-		// this line is used by starport scaffolding # root/arguments
-	)
-
-	if err := svrcmd.Execute(rootCmd, app.DefaultNodeHome); err != nil {
-		switch e := err.(type) {
-		case server.ErrorCode:
-			os.Exit(e.Code)
-
-		default:
-			os.Exit(1)
-		}
+	appparams.SetAddressPrefixes("cosmos")
+	rootCmd := cmd.NewRootCmd()
+	if err := svrcmd.Execute(rootCmd, "", app.DefaultNodeHome); err != nil {
+		fmt.Fprintln(rootCmd.OutOrStderr(), err)
+		os.Exit(1)
 	}
 }
